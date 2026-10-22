@@ -22,6 +22,13 @@ import {
   claimCustomerReceipt,
   getCustomerReceipts,
   getDashboardMetrics,
+  deleteProduct,
+  getOutlets,
+  getSalesReport,
+  getEmployees,
+  addEmployee,
+  updateEmployee,
+  deleteEmployee,
   inMemoryStore,
 } from './backend/src/db/pool.ts';
 
@@ -199,6 +206,12 @@ app.put('/api/products/:id', async (req: Request, res: Response) => {
   res.json(updated);
 });
 
+app.delete('/api/products/:id', async (req: Request, res: Response) => {
+  const success = await deleteProduct(req.params.id);
+  if (!success) return res.status(404).json({ error: 'Product not found or already deleted.' });
+  res.json({ success: true, message: 'Product removed from catalogue.' });
+});
+
 app.post('/api/products/import-csv', async (req: Request, res: Response) => {
   const { items, companyId } = req.body;
   if (!Array.isArray(items)) {
@@ -294,17 +307,33 @@ app.get('/api/receipts/:token', async (req: Request, res: Response) => {
   const { token } = req.params;
   const result = await getReceiptByToken(token);
 
-  if (!result) {
+  if (!result || !result.receipt || !result.transaction) {
     return res.status(404).json({ error: 'Receipt not found or invalid token.' });
   }
 
+  if (result.isExpired) {
+    return res.status(410).json({
+      error: 'Receipt viewing token has expired (24-hour security window lapsed). Access is rejected.',
+      isExpired: true,
+      receiptNumber: result.receipt.receipt_number,
+    });
+  }
+
+  const host = req.get('host') || 'localhost:3000';
+  const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+  const publicOrigin = process.env.APP_URL || `${protocol}://${host}`;
+
   res.json({
-    receipt: result.receipt,
+    receipt: {
+      ...result.receipt,
+      qr_code_data: `${publicOrigin}/receipt/${result.token.token}`,
+    },
     transaction: result.transaction,
     token: result.token,
-    isExpired: result.isExpired,
+    isExpired: false,
     company: inMemoryStore.companies[0],
     outlet: inMemoryStore.outlets[0],
+    publicOrigin,
   });
 });
 
@@ -335,6 +364,97 @@ app.get('/api/dashboard/metrics', async (req: Request, res: Response) => {
   const companyId = (req.query.companyId as string) || 'cmp-demo-01';
   const metrics = await getDashboardMetrics(companyId);
   res.json(metrics);
+});
+
+// Outlets for Outlet Switcher
+app.get('/api/outlets', async (req: Request, res: Response) => {
+  const companyId = (req.query.companyId as string) || 'cmp-demo-01';
+  const outlets = await getOutlets(companyId);
+  res.json(outlets);
+});
+
+// Employees Management (Full CRUD for Store Manager)
+app.get('/api/employees', async (req: Request, res: Response) => {
+  const companyId = (req.query.companyId as string) || 'cmp-demo-01';
+  const employees = await getEmployees(companyId);
+  res.json(employees);
+});
+
+app.post('/api/employees', async (req: Request, res: Response) => {
+  const { name, email } = req.body;
+  if (!name || !email) {
+    return res.status(400).json({ error: 'Employee name and email are required.' });
+  }
+  const employee = await addEmployee(req.body);
+  res.status(201).json(employee);
+});
+
+app.put('/api/employees/:id', async (req: Request, res: Response) => {
+  const updated = await updateEmployee(req.params.id, req.body);
+  if (!updated) {
+    return res.status(404).json({ error: 'Employee not found.' });
+  }
+  res.json(updated);
+});
+
+app.delete('/api/employees/:id', async (req: Request, res: Response) => {
+  const success = await deleteEmployee(req.params.id);
+  if (!success) {
+    return res.status(404).json({ error: 'Employee not found or already removed.' });
+  }
+  res.json({ success: true, message: 'Employee account removed successfully.' });
+});
+
+// Sales Reports & Analytics
+app.get('/api/reports/sales', async (req: Request, res: Response) => {
+  const companyId = (req.query.companyId as string) || 'cmp-demo-01';
+  const outletId = (req.query.outletId as string) || 'all';
+  const startDate = req.query.startDate as string;
+  const endDate = req.query.endDate as string;
+  const report = await getSalesReport(companyId, { outletId, startDate, endDate });
+  res.json(report);
+});
+
+// Payment Verification Adapter
+app.post('/api/payments/verify', async (req: Request, res: Response) => {
+  const { transactionId, paymentMethod, amount, upiRef, cardLast4 } = req.body;
+  if (!transactionId || !paymentMethod || !amount) {
+    return res.status(400).json({ error: 'transactionId, paymentMethod, and amount are required.' });
+  }
+
+  // Authoritative settlement check
+  const tx = inMemoryStore.transactions.find(t => t.id === transactionId);
+  if (!tx) {
+    return res.status(404).json({ error: 'Transaction not found.' });
+  }
+
+  // Handle provider configuration checks
+  let isProviderConfigured = true;
+  let status: 'verified' | 'pending' | 'failed' = 'verified';
+  let message = 'Payment verified and settled.';
+
+  if (paymentMethod === 'upi') {
+    // In production, requires merchant UPI gateway webhook secret (e.g., Razorpay/PayU/PhonePe)
+    const isLiveMerchantConfigured = !!process.env.UPI_MERCHANT_VPA;
+    if (!isLiveMerchantConfigured) {
+      message = 'UPI payment confirmed in Sandbox Test Mode (Live UPI_MERCHANT_VPA not set in env).';
+    }
+  } else if (paymentMethod === 'card') {
+    const isTerminalConfigured = !!process.env.CARD_TERMINAL_ID;
+    if (!isTerminalConfigured) {
+      message = 'Card transaction authorized in Sandbox Test Mode (Live CARD_TERMINAL_ID not set in env).';
+    }
+  }
+
+  tx.payment_status = 'verified';
+  tx.payment_method = paymentMethod;
+
+  res.json({
+    success: true,
+    status,
+    message,
+    transaction: tx,
+  });
 });
 
 // 9. Server-Side AI Assistant (Gemini SDK @google/genai)

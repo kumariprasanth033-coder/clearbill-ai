@@ -20,6 +20,8 @@ import { DatabaseStatusScreen } from './pages/DatabaseStatusScreen.tsx';
 import { TransactionsLedger } from './pages/TransactionsLedger.tsx';
 import { SustainabilityReport } from './pages/SustainabilityReport.tsx';
 import { ReconciliationScreen } from './pages/ReconciliationScreen.tsx';
+import { PaymentsScreen } from './pages/PaymentsScreen.tsx';
+import { ReportsScreen } from './pages/ReportsScreen.tsx';
 import { EmployeesScreen } from './pages/EmployeesScreen.tsx';
 import { User, Company, Outlet, CartItem, Product, DbStatus } from './types.ts';
 
@@ -102,8 +104,48 @@ export default function App() {
     },
   ]);
 
-  // Active digital receipt token to view
-  const [activeReceiptToken, setActiveReceiptToken] = useState<string>('t-guest-001');
+  // Active digital receipt token to view (defaults to URL path token if present)
+  const [activeReceiptToken, setActiveReceiptToken] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname;
+      if (path.startsWith('/receipt/')) {
+        const tok = path.replace('/receipt/', '').split('/')[0].split('?')[0];
+        if (tok) return tok;
+      }
+      const params = new URLSearchParams(window.location.search);
+      const qTok = params.get('receipt') || params.get('token');
+      if (qTok) return qTok;
+    }
+    return 't-guest-001';
+  });
+
+  // URL routing effect for direct receipt link and popstate navigation
+  useEffect(() => {
+    const handleUrlRoute = () => {
+      if (typeof window === 'undefined') return;
+      const path = window.location.pathname;
+      if (path.startsWith('/receipt/')) {
+        const tok = path.replace('/receipt/', '').split('/')[0].split('?')[0];
+        if (tok) {
+          setActiveReceiptToken(tok);
+          setCurrentTab('digital-receipts');
+          setIsLandingPage(false);
+          return;
+        }
+      }
+      const params = new URLSearchParams(window.location.search);
+      const qTok = params.get('receipt') || params.get('token');
+      if (qTok) {
+        setActiveReceiptToken(qTok);
+        setCurrentTab('digital-receipts');
+        setIsLandingPage(false);
+      }
+    };
+
+    handleUrlRoute();
+    window.addEventListener('popstate', handleUrlRoute);
+    return () => window.removeEventListener('popstate', handleUrlRoute);
+  }, []);
 
   // Check database status on mount
   useEffect(() => {
@@ -129,11 +171,17 @@ export default function App() {
   const handleCheckoutSuccess = (receiptToken: string) => {
     setActiveReceiptToken(receiptToken);
     setCurrentTab('digital-receipts');
+    if (typeof window !== 'undefined') {
+      window.history.pushState(null, '', `/receipt/${receiptToken}`);
+    }
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
     setIsLandingPage(true);
+    if (typeof window !== 'undefined') {
+      window.history.pushState(null, '', '/');
+    }
   };
 
   const handleAuthSuccess = (user: User, company: Company, outlet: Outlet) => {
@@ -142,8 +190,67 @@ export default function App() {
     setCurrentOutlet(outlet);
     setAuthModalOpen(false);
     setIsLandingPage(false);
-    setCurrentTab('dashboard');
+    // If user logged in while viewing a receipt, remain on the receipt
+    if (currentTab !== 'digital-receipts') {
+      setCurrentTab('dashboard');
+    }
   };
+
+  // If viewing a digital receipt directly (e.g. customer scanned QR with phone)
+  if (currentTab === 'digital-receipts' && !currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-50 text-slate-900">
+        <header className="bg-white border-b border-slate-200 sticky top-0 z-40 px-4 py-3 shadow-xs">
+          <div className="max-w-xl mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-[#16A34A] flex items-center justify-center text-white font-bold text-base shadow-xs">
+                C
+              </div>
+              <div>
+                <span className="font-extrabold text-[#172B4D] text-sm tracking-tight">ClearBill AI</span>
+                <span className="block text-[10px] text-slate-400">Verified Smart Digital Receipt</span>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setAuthModalRole('customer');
+                setIsRegisterMode(false);
+                setAuthModalOpen(true);
+              }}
+              className="text-xs font-semibold text-[#16A34A] hover:text-[#15803D] px-2.5 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 cursor-pointer"
+            >
+              Customer Sign In
+            </button>
+          </div>
+        </header>
+
+        <main className="p-4 sm:p-6">
+          <DigitalReceiptScreen
+            receiptToken={activeReceiptToken}
+            onBackToBilling={() => {
+              if (typeof window !== 'undefined') window.history.pushState(null, '', '/');
+              setIsLandingPage(true);
+            }}
+            onClaimSuccess={() => {}}
+            onPromptAuth={() => {
+              setAuthModalRole('customer');
+              setIsRegisterMode(false);
+              setAuthModalOpen(true);
+            }}
+          />
+        </main>
+
+        {authModalOpen && (
+          <AuthModal
+            initialRole={authModalRole}
+            isRegistering={isRegisterMode}
+            onSuccess={handleAuthSuccess}
+            onClose={() => setAuthModalOpen(false)}
+          />
+        )}
+      </div>
+    );
+  }
 
   // If user navigated to landing page or logged out
   if (isLandingPage || !currentUser) {
@@ -240,8 +347,16 @@ export default function App() {
       {currentTab === 'digital-receipts' && (
         <DigitalReceiptScreen
           receiptToken={activeReceiptToken}
-          onBackToBilling={() => setCurrentTab('new-bill')}
+          onBackToBilling={() => {
+            if (typeof window !== 'undefined') window.history.pushState(null, '', '/');
+            setCurrentTab('new-bill');
+          }}
           onClaimSuccess={() => {}}
+          onPromptAuth={() => {
+            setAuthModalRole('customer');
+            setIsRegisterMode(false);
+            setAuthModalOpen(true);
+          }}
         />
       )}
 
@@ -258,13 +373,13 @@ export default function App() {
         />
       )}
 
-      {currentTab === 'payments' && <ReconciliationScreen />}
+      {currentTab === 'payments' && <PaymentsScreen />}
 
       {currentTab === 'reconciliation' && <ReconciliationScreen />}
 
       {currentTab === 'sustainability' && <SustainabilityReport />}
 
-      {currentTab === 'reports' && <ManagerDashboard onNavigate={setCurrentTab} />}
+      {currentTab === 'reports' && <ReportsScreen />}
 
       {currentTab === 'ai-assistant' && (
         <AiAssistantScreen currentUser={currentUser} currentCompany={currentCompany} />

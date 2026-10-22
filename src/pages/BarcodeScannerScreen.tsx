@@ -25,6 +25,8 @@ import {
   FileQuestion,
   HelpCircle,
   Sparkles,
+  X,
+  Package,
 } from 'lucide-react';
 import { Product } from '../types.ts';
 
@@ -51,6 +53,15 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
   const [scanHistory, setScanHistory] = useState<{ barcode: string; product?: Product; timestamp: string }[]>([]);
   const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+
+  // Quick Register Product Modal state for unknown barcodes
+  const [regModalOpen, setRegModalOpen] = useState(false);
+  const [regBarcode, setRegBarcode] = useState('');
+  const [regName, setRegName] = useState('');
+  const [regPrice, setRegPrice] = useState('');
+  const [regCategory, setRegCategory] = useState('Groceries');
+  const [regTaxRate, setRegTaxRate] = useState('5');
+  const [regLoading, setRegLoading] = useState(false);
 
   // Duplicate scan guard
   const lastScannedCodeRef = useRef<string | null>(null);
@@ -240,6 +251,43 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
     if (manualInput.trim()) {
       handleBarcodeDetected(manualInput.trim());
       setManualInput('');
+    }
+  };
+
+  const handleQuickRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!regName.trim() || !regBarcode.trim()) return;
+    setRegLoading(true);
+
+    try {
+      const res = await fetch('/api/products', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          product_name: regName.trim(),
+          barcode: regBarcode.trim(),
+          category: regCategory,
+          unit_price: parseFloat(regPrice) || 0,
+          tax_rate: parseFloat(regTaxRate) || 0,
+          unit: 'pcs',
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.id) {
+        setMatchedProduct(data);
+        setLookupError(null);
+        setRegModalOpen(false);
+        setRegName('');
+        setRegPrice('');
+        if (onAddToCart) {
+          onAddToCart(data);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setRegLoading(false);
     }
   };
 
@@ -445,13 +493,23 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                   </div>
                 </div>
 
-                <button
-                  onClick={() => onAddToCart && onAddToCart(matchedProduct)}
-                  className="w-full py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1.5"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Add Another (+1) to Draft Bill</span>
-                </button>
+                <div className="pt-2 flex items-center gap-2">
+                  <button
+                    onClick={() => onAddToCart && onAddToCart(matchedProduct)}
+                    className="flex-1 py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1.5"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Add Another (+1)</span>
+                  </button>
+                  {onNavigateToBilling && (
+                    <button
+                      onClick={onNavigateToBilling}
+                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors"
+                    >
+                      Go to Checkout
+                    </button>
+                  )}
+                </div>
               </div>
             ) : lookupError ? (
               <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
@@ -464,8 +522,18 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                 </div>
                 <div className="flex gap-2 pt-2">
                   <button
+                    onClick={() => {
+                      setRegBarcode(scannedBarcode || '');
+                      setRegModalOpen(true);
+                    }}
+                    className="flex-1 py-1.5 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Quick Register Product</span>
+                  </button>
+                  <button
                     onClick={() => setManualInput(scannedBarcode || '')}
-                    className="flex-1 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold rounded-lg transition-colors"
+                    className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold rounded-lg transition-colors"
                   >
                     Edit / Search
                   </button>
@@ -536,6 +604,141 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
           )}
         </div>
       </div>
+
+      {/* Quick Register Product Modal Dialog */}
+      {regModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-emerald-50 text-[#16A34A] rounded-lg">
+                  <Package className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#172B4D]">Quick Register Product</h3>
+                  <p className="text-xs text-slate-500">Add unknown barcode directly to your store catalog</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setRegModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleQuickRegister} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Scanned Barcode
+                </label>
+                <input
+                  type="text"
+                  value={regBarcode}
+                  onChange={(e) => setRegBarcode(e.target.value)}
+                  required
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Product Name *
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Britania Good Day 100g"
+                  value={regName}
+                  onChange={(e) => setRegName(e.target.value)}
+                  required
+                  className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Category
+                  </label>
+                  <select
+                    value={regCategory}
+                    onChange={(e) => setRegCategory(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  >
+                    <option value="Groceries">Groceries</option>
+                    <option value="Dairy">Dairy</option>
+                    <option value="Beverages">Beverages</option>
+                    <option value="Snacks">Snacks</option>
+                    <option value="Bakery">Bakery</option>
+                    <option value="Personal Care">Personal Care</option>
+                    <option value="General">General</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    GST Rate (%)
+                  </label>
+                  <select
+                    value={regTaxRate}
+                    onChange={(e) => setRegTaxRate(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  >
+                    <option value="0">0% (Nil)</option>
+                    <option value="5">5% GST</option>
+                    <option value="12">12% GST</option>
+                    <option value="18">18% GST</option>
+                    <option value="28">28% GST</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Selling Price (₹) *
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  placeholder="0.00"
+                  value={regPrice}
+                  onChange={(e) => setRegPrice(e.target.value)}
+                  required
+                  className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRegModalOpen(false)}
+                  className="px-4 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={regLoading}
+                  className="px-4 py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-60"
+                >
+                  {regLoading ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Save & Add to Bill</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

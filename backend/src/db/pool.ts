@@ -72,6 +72,21 @@ export interface BillingFieldConfig {
   display_order: number;
 }
 
+export interface EmployeeEntity {
+  id: string;
+  company_id: string;
+  outlet_id?: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: 'Manager' | 'Cashier / Retailer';
+  outlet_name: string;
+  code: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TransactionEntity {
   id: string;
   company_id: string;
@@ -113,7 +128,9 @@ export interface ReceiptEntity {
   receipt_number: string;
   qr_code_data: string;
   receipt_url: string;
+  receipt_token?: string;
   paper_print_avoided: boolean;
+  paper_grams_saved?: number;
   created_at: string;
   tokens: {
     id: string;
@@ -188,6 +205,51 @@ class Store {
       full_name: 'Amit Kumar',
       role: 'customer' as const,
       is_active: true,
+    },
+  ];
+
+  employees: EmployeeEntity[] = [
+    {
+      id: 'emp-01',
+      company_id: 'cmp-demo-01',
+      outlet_id: 'out-demo-01',
+      name: 'Rajesh Sharma',
+      email: 'manager@clearbill.ai',
+      phone: '+91 98765 43210',
+      role: 'Manager',
+      outlet_name: 'MG Road Flagship Store (BLR-01)',
+      code: 'EMP-001',
+      is_active: true,
+      created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    {
+      id: 'emp-02',
+      company_id: 'cmp-demo-01',
+      outlet_id: 'out-demo-01',
+      name: 'Priya Patel',
+      email: 'cashier@clearbill.ai',
+      phone: '+91 98765 43212',
+      role: 'Cashier / Retailer',
+      outlet_name: 'MG Road Flagship Store (BLR-01)',
+      code: 'EMP-002',
+      is_active: true,
+      created_at: new Date(Date.now() - 15 * 86400000).toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    {
+      id: 'emp-03',
+      company_id: 'cmp-demo-01',
+      outlet_id: 'out-demo-02',
+      name: 'Vikram Singh',
+      email: 'vikram.singh@clearbill.ai',
+      phone: '+91 98765 43214',
+      role: 'Cashier / Retailer',
+      outlet_name: 'Indiranagar Express Outlet (BLR-02)',
+      code: 'EMP-003',
+      is_active: true,
+      created_at: new Date(Date.now() - 5 * 86400000).toISOString(),
+      updated_at: new Date().toISOString(),
     },
   ];
 
@@ -336,6 +398,18 @@ class Store {
       created_at: new Date(Date.now() - 1800000).toISOString(),
       tokens: [
         { id: 'tok-003', token: 't-guest-003', viewing_session_seconds: 30, expires_at: new Date(Date.now() + 86400000).toISOString(), is_claimed: false }
+      ]
+    },
+    {
+      id: 'rcpt-expired',
+      transaction_id: 'tx-003',
+      receipt_number: 'RCP-EXPIRED',
+      qr_code_data: 'https://clearbill.ai/receipt/t-guest-expired',
+      receipt_url: '/receipt/t-guest-expired',
+      paper_print_avoided: true,
+      created_at: new Date(Date.now() - 90000000).toISOString(),
+      tokens: [
+        { id: 'tok-exp', token: 't-guest-expired', viewing_session_seconds: 30, expires_at: new Date(Date.now() - 3600000).toISOString(), is_claimed: false }
       ]
     }
   ];
@@ -553,6 +627,20 @@ export async function updateProduct(id: string, updates: Partial<ProductEntity>)
   return updated;
 }
 
+export async function deleteProduct(id: string): Promise<boolean> {
+  const index = inMemoryStore.products.findIndex(p => p.id === id);
+  if (index === -1) return false;
+  inMemoryStore.products[index].is_active = false;
+  if (isRealMysqlConnected && pool) {
+    try {
+      await pool.query('UPDATE products SET is_active = 0, updated_at = NOW() WHERE id = ?', [id]);
+    } catch (err) {
+      console.warn('[DB] MySQL deleteProduct failed:', err);
+    }
+  }
+  return true;
+}
+
 /**
  * Billing field configs
  */
@@ -572,19 +660,29 @@ export async function createTransactionWithItems(
   txData: Omit<TransactionEntity, 'id' | 'items' | 'created_at'>,
   items: Omit<TransactionItemEntity, 'id' | 'transaction_id'>[]
 ): Promise<{ transaction: TransactionEntity; receipt: ReceiptEntity }> {
+  if (!items || items.length === 0) {
+    throw new Error('Transaction requires at least one line item.');
+  }
+
   const txId = `tx-${Date.now()}`;
   const now = new Date().toISOString();
 
   // Authoritative server-side decimal-safe totals calculation
   let subtotal = 0;
   let taxAmount = 0;
-  let discountAmount = Number(txData.discount_amount) || 0;
+  let discountAmount = Math.max(0, Number(txData.discount_amount) || 0);
 
   const transactionItems: TransactionItemEntity[] = items.map((it, idx) => {
-    const qty = Number(it.quantity) || 1;
-    const price = Number(it.unit_price) || 0;
-    const taxR = Number(it.tax_rate) || 0;
-    const itemDiscount = Number(it.discount_amount) || 0;
+    const qty = Number(it.quantity);
+    if (isNaN(qty) || qty <= 0) {
+      throw new Error(`Invalid line item quantity for ${it.product_name || 'item'}: quantity must be greater than zero.`);
+    }
+    const price = Number(it.unit_price);
+    if (isNaN(price) || price < 0) {
+      throw new Error(`Invalid line item price for ${it.product_name || 'item'}: unit price cannot be negative.`);
+    }
+    const taxR = Math.max(0, Number(it.tax_rate) || 0);
+    const itemDiscount = Math.max(0, Number(it.discount_amount) || 0);
     const lineSubtotal = Math.max(0, qty * price - itemDiscount);
     const itemTax = (lineSubtotal * taxR) / 100;
     const lineTotal = Number((lineSubtotal + itemTax).toFixed(2));
@@ -596,7 +694,7 @@ export async function createTransactionWithItems(
       id: `txi-${Date.now()}-${idx}`,
       transaction_id: txId,
       product_id: it.product_id,
-      product_name: it.product_name,
+      product_name: it.product_name || 'Product Item',
       barcode: it.barcode,
       quantity: qty,
       unit_price: price,
@@ -607,6 +705,8 @@ export async function createTransactionWithItems(
     };
   });
 
+  // Cap transaction-level discount at subtotal
+  discountAmount = Math.min(discountAmount, subtotal);
   const grandTotal = Number((Math.max(0, subtotal - discountAmount) + taxAmount).toFixed(2));
 
   const transaction: TransactionEntity = {
@@ -644,7 +744,9 @@ export async function createTransactionWithItems(
     receipt_number: receiptNumber,
     qr_code_data: `${process.env.APP_URL || 'http://localhost:3000'}${receiptUrl}`,
     receipt_url: receiptUrl,
+    receipt_token: guestToken,
     paper_print_avoided: true,
+    paper_grams_saved: 2.5,
     created_at: now,
     tokens: [
       {
@@ -659,10 +761,76 @@ export async function createTransactionWithItems(
 
   inMemoryStore.receipts.unshift(receipt);
 
+  // Persist to MySQL when connected
+  if (isRealMysqlConnected && pool) {
+    try {
+      await pool.query(
+        `INSERT INTO transactions (id, company_id, outlet_id, user_id, transaction_number, status, subtotal, discount_amount, tax_amount, grand_total, payment_method, payment_status, customer_name, customer_phone, notes, finalized_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          txId,
+          transaction.company_id,
+          transaction.outlet_id,
+          transaction.user_id,
+          transaction.transaction_number,
+          transaction.status,
+          transaction.subtotal,
+          transaction.discount_amount,
+          transaction.tax_amount,
+          transaction.grand_total,
+          transaction.payment_method,
+          transaction.payment_status,
+          transaction.customer_name,
+          transaction.customer_phone,
+          transaction.notes,
+          transaction.finalized_at,
+          transaction.created_at,
+        ]
+      );
+
+      for (const it of transactionItems) {
+        await pool.query(
+          `INSERT INTO transaction_items (id, transaction_id, product_id, product_name, barcode, quantity, unit_price, tax_rate, tax_amount, discount_amount, line_total)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            it.id,
+            it.transaction_id,
+            it.product_id,
+            it.product_name,
+            it.barcode || null,
+            it.quantity,
+            it.unit_price,
+            it.tax_rate,
+            it.tax_amount,
+            it.discount_amount,
+            it.line_total,
+          ]
+        );
+      }
+
+      await pool.query(
+        `INSERT INTO receipts (id, transaction_id, receipt_number, qr_code_data, receipt_url, paper_print_avoided, paper_grams_saved, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [rcptId, txId, receiptNumber, receipt.qr_code_data, receiptUrl, 1, 2.5, now]
+      );
+
+      await pool.query(
+        `INSERT INTO receipt_tokens (id, receipt_id, token, viewing_session_seconds, expires_at, is_claimed)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [`tok-id-${Date.now()}`, rcptId, guestToken, 30, new Date(Date.now() + 86400000).toISOString(), 0]
+      );
+    } catch (dbErr) {
+      console.warn('[DB] MySQL transaction/receipt persist notice (in-memory store retained):', dbErr);
+    }
+  }
+
   return { transaction, receipt };
 }
 
 export async function getReceiptByToken(token: string) {
+  if (!token || typeof token !== 'string') return null;
+
+  // 1. Check in-memory store
   for (const rcpt of inMemoryStore.receipts) {
     const t = rcpt.tokens.find(tok => tok.token === token);
     if (t) {
@@ -676,6 +844,36 @@ export async function getReceiptByToken(token: string) {
       };
     }
   }
+
+  // 2. Query MySQL if connected
+  if (isRealMysqlConnected && pool) {
+    try {
+      const [tokRows] = await pool.query('SELECT * FROM receipt_tokens WHERE token = ?', [token]);
+      if (Array.isArray(tokRows) && tokRows.length > 0) {
+        const tok = tokRows[0] as any;
+        const [rcptRows] = await pool.query('SELECT * FROM receipts WHERE id = ?', [tok.receipt_id]);
+        if (Array.isArray(rcptRows) && rcptRows.length > 0) {
+          const rcpt = rcptRows[0] as any;
+          const [txRows] = await pool.query('SELECT * FROM transactions WHERE id = ?', [rcpt.transaction_id]);
+          if (Array.isArray(txRows) && txRows.length > 0) {
+            const tx = txRows[0] as any;
+            const [itemRows] = await pool.query('SELECT * FROM transaction_items WHERE transaction_id = ?', [tx.id]);
+            tx.items = itemRows;
+            const isExpired = new Date(tok.expires_at).getTime() < Date.now();
+            return {
+              receipt: rcpt,
+              token: tok,
+              transaction: tx,
+              isExpired,
+            };
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[DB] MySQL getReceiptByToken failed:', err);
+    }
+  }
+
   return null;
 }
 
@@ -738,6 +936,141 @@ export async function getDashboardMetrics(companyId: string) {
     cardTotal: Number(cardTotal.toFixed(2)),
     recentTransactions: txs.slice(0, 10),
   };
+}
+
+export async function getOutlets(companyId: string) {
+  return inMemoryStore.outlets.filter(o => o.company_id === companyId);
+}
+
+export async function getSalesReport(
+  companyId: string,
+  filter?: { outletId?: string; startDate?: string; endDate?: string }
+) {
+  let txs = inMemoryStore.transactions.filter(t => t.company_id === companyId);
+  if (filter?.outletId && filter.outletId !== 'all') {
+    txs = txs.filter(t => t.outlet_id === filter.outletId);
+  }
+  if (filter?.startDate) {
+    const start = new Date(filter.startDate).getTime();
+    txs = txs.filter(t => new Date(t.created_at).getTime() >= start);
+  }
+  if (filter?.endDate) {
+    const end = new Date(filter.endDate).getTime();
+    txs = txs.filter(t => new Date(t.created_at).getTime() <= end);
+  }
+
+  // Aggregate product performance
+  const productAggregates: Record<
+    string,
+    { product_name: string; barcode?: string; quantity: number; revenue: number; tax: number }
+  > = {};
+
+  for (const tx of txs) {
+    for (const item of tx.items) {
+      const key = item.product_id || item.product_name;
+      if (!productAggregates[key]) {
+        productAggregates[key] = {
+          product_name: item.product_name,
+          barcode: item.barcode,
+          quantity: 0,
+          revenue: 0,
+          tax: 0,
+        };
+      }
+      productAggregates[key].quantity += item.quantity;
+      productAggregates[key].revenue += item.line_total;
+      productAggregates[key].tax += item.tax_amount;
+    }
+  }
+
+  const topProducts = Object.values(productAggregates).sort((a, b) => b.revenue - a.revenue);
+
+  const totalRevenue = txs.reduce((sum, t) => sum + t.grand_total, 0);
+  const totalTax = txs.reduce((sum, t) => sum + t.tax_amount, 0);
+  const totalDiscount = txs.reduce((sum, t) => sum + t.discount_amount, 0);
+
+  return {
+    transactions: txs,
+    totalRevenue: Number(totalRevenue.toFixed(2)),
+    totalTax: Number(totalTax.toFixed(2)),
+    totalDiscount: Number(totalDiscount.toFixed(2)),
+    transactionCount: txs.length,
+    topProducts,
+  };
+}
+
+/**
+ * Employee Management Operations (CRUD)
+ */
+export async function getEmployees(companyId = 'cmp-demo-01'): Promise<EmployeeEntity[]> {
+  if (isRealMysqlConnected && pool) {
+    try {
+      const [rows] = await pool.query(
+        `SELECT em.id, em.company_id, em.outlet_id, u.full_name as name, u.email, u.phone,
+                CASE WHEN u.role = 'manager' THEN 'Manager' ELSE 'Cashier / Retailer' END as role,
+                COALESCE(o.outlet_name, 'All Outlets') as outlet_name,
+                em.employee_code as code, em.is_active, em.created_at, em.updated_at
+         FROM employee_memberships em
+         JOIN users u ON em.user_id = u.id
+         LEFT JOIN outlets o ON em.outlet_id = o.id
+         WHERE em.company_id = ?
+         ORDER BY em.created_at ASC`,
+        [companyId]
+      );
+      if (Array.isArray(rows) && rows.length > 0) {
+        return rows as EmployeeEntity[];
+      }
+    } catch (err) {
+      console.warn('[DB] MySQL employee query failed, falling back to memory store:', err);
+    }
+  }
+  return inMemoryStore.employees.filter(e => e.company_id === companyId);
+}
+
+export async function addEmployee(data: Partial<EmployeeEntity>): Promise<EmployeeEntity> {
+  const id = `emp-${Date.now()}`;
+  const now = new Date().toISOString();
+  const codeNum = inMemoryStore.employees.length + 1;
+  const code = data.code || `EMP-00${codeNum}`;
+
+  const newEmp: EmployeeEntity = {
+    id,
+    company_id: data.company_id || 'cmp-demo-01',
+    outlet_id: data.outlet_id || 'out-demo-01',
+    name: data.name || 'New Staff Member',
+    email: data.email || `staff${Date.now()}@clearbill.ai`,
+    phone: data.phone || '+91 98765 00000',
+    role: data.role || 'Cashier / Retailer',
+    outlet_name: data.outlet_name || 'MG Road Flagship Store (BLR-01)',
+    code,
+    is_active: data.is_active !== undefined ? data.is_active : true,
+    created_at: now,
+    updated_at: now,
+  };
+
+  inMemoryStore.employees.push(newEmp);
+  return newEmp;
+}
+
+export async function updateEmployee(id: string, data: Partial<EmployeeEntity>): Promise<EmployeeEntity | null> {
+  const index = inMemoryStore.employees.findIndex(e => e.id === id);
+  if (index === -1) return null;
+
+  const existing = inMemoryStore.employees[index];
+  const updated: EmployeeEntity = {
+    ...existing,
+    ...data,
+    updated_at: new Date().toISOString(),
+  };
+
+  inMemoryStore.employees[index] = updated;
+  return updated;
+}
+
+export async function deleteEmployee(id: string): Promise<boolean> {
+  const initialLength = inMemoryStore.employees.length;
+  inMemoryStore.employees = inMemoryStore.employees.filter(e => e.id !== id);
+  return inMemoryStore.employees.length < initialLength;
 }
 
 export default pool;
