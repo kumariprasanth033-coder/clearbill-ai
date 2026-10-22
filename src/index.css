@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-primary: #F7F9FC;
+    --bg-card: #FFFFFF;
+    --text-primary: #172B4D;
+    --text-secondary: #64748B;
+    --primary-green: #16A34A;
+    --primary-green-hover: #15803D;
+    --bg-light-green: #DCFCE7;
+    --border-color: #E2E8F0;
+    --bg-input: #FFFFFF;
+    --sidebar-bg: #172033;
+    --sidebar-text: #E2E8F0;
+    --sidebar-active: #16A34A;
+    --sidebar-hover: #263449;
+    --color-error: #DC2626;
+    --color-warning: #D97706;
+    --color-success: #16A34A;
+  }
+
+  body {
+    background-color: #F7F9FC;
+    color: #172B4D;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+    padding: 0;
+  }
+}
+
+/* Custom scrollbars for clean dashboards */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #F1F5F9;
+}
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+/* Tabular figures for all financial amounts */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

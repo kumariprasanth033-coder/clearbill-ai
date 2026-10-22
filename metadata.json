@@ -1,0 +1,6 @@
+{
+  "name": "ClearBill AI",
+  "description": "Simple Billing. Fast Scanning. Smart Digital Receipts. Professional retail billing and barcode scanning platform.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
