@@ -5,6 +5,7 @@
  */
 
 import mysql from 'mysql2/promise';
+import crypto from 'crypto';
 
 export interface DbStatus {
   isConnected: boolean;
@@ -16,6 +17,86 @@ export interface DbStatus {
   tablesCount: number;
   message: string;
   lastChecked: string;
+}
+
+export interface CompanyEntity {
+  id: string;
+  business_name: string;
+  category: string;
+  business_reg_number?: string;
+  owner_name: string;
+  email: string;
+  phone?: string;
+  address?: string;
+  country?: string;
+  state?: string;
+  currency: string;
+  timezone: string;
+  tax_type?: string;
+  tax_identification_number?: string;
+  default_tax_rate?: number;
+  logo_url?: string;
+  payment_methods_accepted?: string[];
+  is_active: boolean;
+}
+
+export interface SettlementConfigEntity {
+  id: string;
+  company_id: string;
+  bank_name: string;
+  account_holder_name: string;
+  masked_account_number: string;
+  encrypted_account_number: string;
+  routing_code: string;
+  payout_schedule: 'daily' | 'weekly' | 'instant';
+  status: 'active' | 'pending_verification' | 'disabled';
+  updated_at: string;
+  updated_by_user_id: string;
+}
+
+export interface SecurityAuditLog {
+  id: string;
+  company_id: string;
+  user_id: string;
+  user_email: string;
+  action: string;
+  ip_address?: string;
+  timestamp: string;
+  details?: string;
+}
+
+// Server-side encryption key for sensitive financial settlement data
+const PAYMENT_ENCRYPTION_KEY = (process.env.PAYMENT_ENCRYPTION_KEY || 'clearbill_finance_aes_secret_key_32b!').padEnd(32).slice(0, 32);
+
+export function encryptSensitive(text: string): string {
+  if (!text) return '';
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(PAYMENT_ENCRYPTION_KEY), iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag().toString('hex');
+  return `${iv.toString('hex')}:${authTag}:${encrypted}`;
+}
+
+export function decryptSensitive(encryptedPayload: string): string {
+  if (!encryptedPayload || !encryptedPayload.includes(':')) return '';
+  try {
+    const [ivHex, authTagHex, encrypted] = encryptedPayload.split(':');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(PAYMENT_ENCRYPTION_KEY), Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (err) {
+    return '';
+  }
+}
+
+export function maskAccountNumber(acc: string): string {
+  if (!acc) return '';
+  const clean = acc.replace(/[\s-]+/g, '');
+  if (clean.length <= 4) return clean;
+  return `•••• •••• •••• ${clean.slice(-4)}`;
 }
 
 const dbConfig = {
@@ -143,19 +224,85 @@ export interface ReceiptEntity {
 
 // Initial In-Memory Store populated with demo products and test barcodes
 class Store {
-  companies = [
+  companies: CompanyEntity[] = [
     {
       id: 'cmp-demo-01',
       business_name: 'Annapurna Retail & Tea Lounge',
       category: 'grocery_store',
+      business_reg_number: 'U52100KA2021PTC148892',
       owner_name: 'Rajesh Sharma',
       email: 'manager@clearbill.ai',
       phone: '+91 98765 43210',
       address: 'Shop 14, Commercial Complex, MG Road, Bengaluru',
+      country: 'India',
+      state: 'Karnataka',
       currency: 'INR',
       timezone: 'Asia/Kolkata',
+      tax_type: 'GST',
       tax_identification_number: '29AAAAA0000A1Z5',
+      default_tax_rate: 5.0,
+      payment_methods_accepted: ['cash', 'upi', 'card'],
       is_active: true,
+    },
+    {
+      id: 'cmp-other-02',
+      business_name: 'Metro Electronics & Mobile Hub',
+      category: 'electronics',
+      business_reg_number: 'U52200KA2022PTC159931',
+      owner_name: 'Sunil Rao',
+      email: 'sunil@metroelectronics.com',
+      phone: '+91 98765 99999',
+      address: 'Indiranagar 12th Main, Bengaluru',
+      country: 'India',
+      state: 'Karnataka',
+      currency: 'INR',
+      timezone: 'Asia/Kolkata',
+      tax_type: 'GST',
+      tax_identification_number: '29BBBBB1111B2Z6',
+      default_tax_rate: 18.0,
+      payment_methods_accepted: ['cash', 'card'],
+      is_active: true,
+    },
+  ];
+
+  settlementConfigs: SettlementConfigEntity[] = [
+    {
+      id: 'set-01',
+      company_id: 'cmp-demo-01',
+      bank_name: 'HDFC Bank Ltd',
+      account_holder_name: 'Annapurna Retail & Tea Lounge',
+      masked_account_number: '•••• •••• •••• 4589',
+      encrypted_account_number: encryptSensitive('5010045892314589'),
+      routing_code: 'HDFC0001234',
+      payout_schedule: 'daily',
+      status: 'active',
+      updated_at: new Date().toISOString(),
+      updated_by_user_id: 'usr-mgr-01',
+    },
+    {
+      id: 'set-02',
+      company_id: 'cmp-other-02',
+      bank_name: 'State Bank of India',
+      account_holder_name: 'Metro Electronics Hub',
+      masked_account_number: '•••• •••• •••• 9912',
+      encrypted_account_number: encryptSensitive('3012948592319912'),
+      routing_code: 'SBIN0004321',
+      payout_schedule: 'daily',
+      status: 'active',
+      updated_at: new Date().toISOString(),
+      updated_by_user_id: 'usr-mgr-other',
+    },
+  ];
+
+  securityAuditLogs: SecurityAuditLog[] = [
+    {
+      id: 'log-01',
+      company_id: 'cmp-demo-01',
+      user_id: 'usr-mgr-01',
+      user_email: 'manager@clearbill.ai',
+      action: 'SETTLEMENT_CONFIG_INITIALIZED',
+      timestamp: new Date().toISOString(),
+      details: 'Initial masked merchant settlement profile verified',
     },
   ];
 
@@ -176,11 +323,20 @@ class Store {
       address: '4th Block, 100ft Road, Indiranagar, Bengaluru',
       phone: '+91 98765 43211',
     },
+    {
+      id: 'out-other-01',
+      company_id: 'cmp-other-02',
+      outlet_name: 'Metro Electronics Flagship',
+      outlet_code: 'MET-01',
+      address: 'Indiranagar 12th Main, Bengaluru',
+      phone: '+91 98765 99999',
+    },
   ];
 
   users = [
     {
       id: 'usr-mgr-01',
+      company_id: 'cmp-demo-01',
       email: 'manager@clearbill.ai',
       phone: '+91 98765 43210',
       password: 'clearbill123',
@@ -190,6 +346,7 @@ class Store {
     },
     {
       id: 'usr-ret-01',
+      company_id: 'cmp-demo-01',
       email: 'cashier@clearbill.ai',
       phone: '+91 98765 43212',
       password: 'clearbill123',
@@ -199,11 +356,22 @@ class Store {
     },
     {
       id: 'usr-cus-01',
+      company_id: 'cmp-demo-01',
       email: 'customer@clearbill.ai',
       phone: '+91 98765 43213',
       password: 'clearbill123',
       full_name: 'Amit Kumar',
       role: 'customer' as const,
+      is_active: true,
+    },
+    {
+      id: 'usr-mgr-other',
+      company_id: 'cmp-other-02',
+      email: 'othermanager@clearbill.ai',
+      phone: '+91 98765 99998',
+      password: 'clearbill123',
+      full_name: 'Sunil Rao',
+      role: 'manager' as const,
       is_active: true,
     },
   ];
@@ -473,6 +641,8 @@ export async function getDbStatus(): Promise<DbStatus> {
  */
 export async function lookupProductByBarcode(companyId: string, barcode: string): Promise<ProductEntity | null> {
   const normalized = barcode.trim();
+  if (!normalized) return null;
+
   if (isRealMysqlConnected && pool) {
     try {
       const [rows] = await pool.query(
@@ -487,11 +657,12 @@ export async function lookupProductByBarcode(companyId: string, barcode: string)
     }
   }
 
-  // Fallback memory store lookup (supports leading zero preservation)
+  // Fast memory store lookup: exact match first, then leading zero match
+  const stripped = normalized.replace(/^0+/, '');
   const found = inMemoryStore.products.find(
     p => p.company_id === companyId && p.is_active && (
       p.barcode === normalized ||
-      p.barcode.replace(/^0+/, '') === normalized.replace(/^0+/, '')
+      (stripped.length > 0 && p.barcode.replace(/^0+/, '') === stripped)
     )
   );
   return found || null;
@@ -673,16 +844,30 @@ export async function createTransactionWithItems(
   let discountAmount = Math.max(0, Number(txData.discount_amount) || 0);
 
   const transactionItems: TransactionItemEntity[] = items.map((it, idx) => {
+    const name = (it.product_name || '').trim();
+    if (!name) {
+      throw new Error(`Line item #${idx + 1} requires a valid product or item name.`);
+    }
+
     const qty = Number(it.quantity);
     if (isNaN(qty) || qty <= 0) {
-      throw new Error(`Invalid line item quantity for ${it.product_name || 'item'}: quantity must be greater than zero.`);
+      throw new Error(`Invalid line item quantity for ${name}: quantity must be greater than zero.`);
     }
+
     const price = Number(it.unit_price);
     if (isNaN(price) || price < 0) {
-      throw new Error(`Invalid line item price for ${it.product_name || 'item'}: unit price cannot be negative.`);
+      throw new Error(`Invalid line item price for ${name}: unit price cannot be negative.`);
     }
+
     const taxR = Math.max(0, Number(it.tax_rate) || 0);
     const itemDiscount = Math.max(0, Number(it.discount_amount) || 0);
+    if (itemDiscount < 0) {
+      throw new Error(`Invalid line item discount for ${name}: discount cannot be negative.`);
+    }
+    if (itemDiscount > qty * price) {
+      throw new Error(`Discount cannot exceed line item total for ${name}.`);
+    }
+
     const lineSubtotal = Math.max(0, qty * price - itemDiscount);
     const itemTax = (lineSubtotal * taxR) / 100;
     const lineTotal = Number((lineSubtotal + itemTax).toFixed(2));
@@ -693,9 +878,9 @@ export async function createTransactionWithItems(
     return {
       id: `txi-${Date.now()}-${idx}`,
       transaction_id: txId,
-      product_id: it.product_id,
-      product_name: it.product_name || 'Product Item',
-      barcode: it.barcode,
+      product_id: it.product_id || undefined,
+      product_name: name,
+      barcode: it.barcode || undefined,
       quantity: qty,
       unit_price: price,
       tax_rate: taxR,
@@ -738,11 +923,16 @@ export async function createTransactionWithItems(
   const guestToken = `tok-${Math.random().toString(36).substring(2, 10)}${Date.now().toString(36)}`;
   const receiptUrl = `/receipt/${guestToken}`;
 
+  let baseAppUrl = process.env.VITE_PUBLIC_APP_URL || process.env.APP_URL || 'http://localhost:3000';
+  if (baseAppUrl.includes('ais-dev-') && baseAppUrl.includes('.run.app')) {
+    baseAppUrl = baseAppUrl.replace('ais-dev-', 'ais-pre-');
+  }
+
   const receipt: ReceiptEntity = {
     id: rcptId,
     transaction_id: txId,
     receipt_number: receiptNumber,
-    qr_code_data: `${process.env.APP_URL || 'http://localhost:3000'}${receiptUrl}`,
+    qr_code_data: `${baseAppUrl}${receiptUrl}`,
     receipt_url: receiptUrl,
     receipt_token: guestToken,
     paper_print_avoided: true,
@@ -1071,6 +1261,28 @@ export async function deleteEmployee(id: string): Promise<boolean> {
   const initialLength = inMemoryStore.employees.length;
   inMemoryStore.employees = inMemoryStore.employees.filter(e => e.id !== id);
   return inMemoryStore.employees.length < initialLength;
+}
+
+export async function getSettlementConfig(companyId: string): Promise<SettlementConfigEntity | null> {
+  return inMemoryStore.settlementConfigs.find(s => s.company_id === companyId) || null;
+}
+
+export async function saveSettlementConfig(config: SettlementConfigEntity): Promise<SettlementConfigEntity> {
+  const existingIdx = inMemoryStore.settlementConfigs.findIndex(s => s.company_id === config.company_id);
+  if (existingIdx !== -1) {
+    inMemoryStore.settlementConfigs[existingIdx] = config;
+  } else {
+    inMemoryStore.settlementConfigs.push(config);
+  }
+  return config;
+}
+
+export async function logSecurityAudit(log: SecurityAuditLog) {
+  inMemoryStore.securityAuditLogs.unshift(log);
+}
+
+export async function getSecurityAuditLogs(companyId: string) {
+  return inMemoryStore.securityAuditLogs.filter(l => l.company_id === companyId);
 }
 
 export default pool;

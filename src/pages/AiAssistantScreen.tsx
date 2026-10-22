@@ -54,21 +54,16 @@ export const AiAssistantScreen: React.FC<AiAssistantScreenProps> = ({
     setLoading(true);
 
     try {
-      const res = await fetch('/api/ai/assistant', {
+      const res = await fetch('/api/ai/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': currentUser?.id || 'usr-mgr-01',
+        },
         body: JSON.stringify({
           prompt: text,
           role: currentUser?.role || 'manager',
-          contextData: {
-            companyName: currentCompany?.business_name || 'Annapurna Retail',
-            totalSales: 1392.82,
-            transactionsCount: 3,
-            paperPrintsAvoided: 3,
-            cashTotal: 84.0,
-            upiTotal: 484.0,
-            cardTotal: 824.82,
-          },
+          companyId: currentCompany?.id || 'cmp-demo-01',
         }),
       });
 

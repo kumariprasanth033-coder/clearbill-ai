@@ -26,13 +26,21 @@ import { EmployeesScreen } from './pages/EmployeesScreen.tsx';
 import { User, Company, Outlet, CartItem, Product, DbStatus } from './types.ts';
 
 export default function App() {
-  // Authentication & session state
-  const [currentUser, setCurrentUser] = useState<User | null>({
-    id: 'usr-ret-01',
-    email: 'cashier@clearbill.ai',
-    fullName: 'Priya Patel',
-    role: 'retailer',
-    phone: '+91 98765 43212',
+  // Authentication & session state (External phones scanning receipt open in guest customer mode)
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname;
+      if (path.startsWith('/receipt/') || window.location.search.includes('receipt') || window.location.search.includes('token')) {
+        return null; // Guest customer scanning receipt on mobile phone
+      }
+    }
+    return {
+      id: 'usr-ret-01',
+      email: 'cashier@clearbill.ai',
+      fullName: 'Priya Patel',
+      role: 'retailer',
+      phone: '+91 98765 43212',
+    };
   });
 
   const [currentCompany, setCurrentCompany] = useState<Company | null>({
@@ -60,7 +68,15 @@ export default function App() {
   const [dbStatus, setDbStatus] = useState<DbStatus | null>(null);
 
   // App routing state
-  const [currentTab, setCurrentTab] = useState<string>('dashboard');
+  const [currentTab, setCurrentTab] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname;
+      if (path.startsWith('/receipt/') || window.location.search.includes('receipt') || window.location.search.includes('token')) {
+        return 'digital-receipts';
+      }
+    }
+    return 'dashboard';
+  });
   const [isLandingPage, setIsLandingPage] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalRole, setAuthModalRole] = useState<'manager' | 'retailer' | 'customer'>('retailer');
@@ -276,6 +292,17 @@ export default function App() {
             });
             setIsLandingPage(false);
             setCurrentTab('barcode-scanner');
+          }}
+          onTryQuickBill={() => {
+            // Instant launch quick bill cashier test
+            setCurrentUser({
+              id: 'usr-ret-01',
+              email: 'cashier@clearbill.ai',
+              fullName: 'Priya Patel',
+              role: 'retailer',
+            });
+            setIsLandingPage(false);
+            setCurrentTab('quick-bill');
           }}
         />
 

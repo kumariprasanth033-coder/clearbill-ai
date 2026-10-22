@@ -29,6 +29,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { User, Company, Outlet, DbStatus } from '../../types.ts';
+import { AiChatbotWidget } from '../AiChatbotWidget.tsx';
 
 interface AppLayoutProps {
   currentTab: string;
@@ -353,6 +354,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
         <main className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#F7F9FC]">
           <div className="max-w-7xl mx-auto">{children}</div>
         </main>
+
+        {/* Floating Personalized Real-Time AI Chatbot Widget */}
+        <AiChatbotWidget
+          currentUser={currentUser}
+          currentCompany={currentCompany}
+          currentOutlet={currentOutlet}
+        />
       </div>
     </div>
   );

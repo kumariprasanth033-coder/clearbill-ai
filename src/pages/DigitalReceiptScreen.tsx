@@ -1,10 +1,24 @@
 /**
  * ClearBill AI - Digital Receipt & Real Machine-Readable QR Screen
- * Authoritative digital invoice with dynamically generated scannable QR code,
- * 24-hour guest security expiration, customer account vault claiming, and PDF print.
+ *
+ * Fixes for Bug 2 & 30-Second Auto-Close:
+ * 1. Solves Google 403 Forbidden Error on Mobile:
+ *    - Encodes verified public HTTPS domain via buildPublicReceiptUrl().
+ *    - Automatically maps restricted Google AI Studio developer URLs ('ais-dev-*.run.app'
+ *      which require developer Google IAM authentication) to public shared preview
+ *      URLs ('ais-pre-*.run.app') so external smartphone cameras open the receipt cleanly.
+ *    - Supports custom LAN IP (e.g. http://192.168.1.X:3000) or VITE_PUBLIC_APP_URL.
+ * 2. 30-Second Billing Auto-Close:
+ *    - Prominent animated 30-second countdown for customer QR scan.
+ *    - Automatically returns to POS / Quick Bill when 30 seconds lapse.
+ *    - Includes "Close Now (Next Customer)" for rapid cashiers and "Pause Timer" if needed.
+ * 3. Preserves ClearBill AI Design & Verification:
+ *    - White/light background, green accents (#16A34A), signature dark navy (#172B4D).
+ *    - High-contrast machine-readable PNG QR matrix.
+ *    - 24-hour guest expiration enforcement & Customer Vault claiming.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import QRCode from 'qrcode';
 import {
   Receipt as ReceiptIcon,
@@ -21,8 +35,19 @@ import {
   Check,
   RefreshCw,
   ShieldCheck,
+  Globe,
+  Pause,
+  Play,
+  Settings2,
+  CheckCircle,
 } from 'lucide-react';
 import { Receipt, Transaction, Company, Outlet } from '../types.ts';
+import {
+  buildPublicReceiptUrl,
+  getPublicAppBaseUrl,
+  isLocalhostOrigin,
+  isAiStudioDevOrigin,
+} from '../utils/urlConfig.ts';
 
 interface DigitalReceiptScreenProps {
   receiptToken: string;
@@ -55,9 +80,9 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
     publicOrigin?: string;
   } | null>(null);
 
-  // 30-Second Guest Viewing Countdown Timer (session quick-view UX)
+  // 30-Second POS Viewing & Auto-Close Timer
   const [countdown, setCountdown] = useState<number>(30);
-  const [sessionExpired, setSessionExpired] = useState(false);
+  const [isTimerPaused, setIsTimerPaused] = useState<boolean>(false);
   const [isClaimed, setIsClaimed] = useState(false);
   const [claimLoading, setClaimLoading] = useState(false);
 
@@ -66,6 +91,11 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
   const [qrGenerating, setQrGenerating] = useState<boolean>(true);
   const [qrError, setQrError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
+
+  // URL Config Override Modal (allows setting Wi-Fi IP e.g. 192.168.1.X:3000 during local dev)
+  const [showUrlConfigModal, setShowUrlConfigModal] = useState(false);
+  const [customUrlInput, setCustomUrlInput] = useState('');
+  const [activeBaseUrl, setActiveBaseUrl] = useState<string>(() => getPublicAppBaseUrl());
 
   // Load receipt data from backend
   useEffect(() => {
@@ -94,7 +124,6 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
         if (data.receipt && data.transaction) {
           setReceiptData(data);
           setCountdown(30);
-          setSessionExpired(false);
           if (data.token?.is_claimed) {
             setIsClaimed(true);
           }
@@ -108,20 +137,15 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
       .finally(() => setLoading(false));
   }, [receiptToken]);
 
-  // Generate real machine-readable QR Code dynamically
-  const generateRealQrCode = React.useCallback(async () => {
+  // Generate real machine-readable QR Code dynamically with public URL
+  const generateRealQrCode = useCallback(async () => {
     if (!receiptToken) return;
     setQrGenerating(true);
     setQrError(null);
 
     try {
-      // Use configured application domain or active window origin
-      const currentOrigin =
-        typeof window !== 'undefined' && window.location.origin
-          ? window.location.origin
-          : 'http://localhost:3000';
-
-      const fullReceiptUrl = `${currentOrigin}/receipt/${receiptToken}`;
+      // Use the verified public URL (never an internal restricted dev URL that causes Google 403)
+      const fullReceiptUrl = buildPublicReceiptUrl(receiptToken);
 
       // Generate real, machine-readable high-contrast QR code
       const dataUrl = await QRCode.toDataURL(fullReceiptUrl, {
@@ -136,6 +160,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
       });
 
       setQrDataUrl(dataUrl);
+      setActiveBaseUrl(getPublicAppBaseUrl());
     } catch (err: any) {
       console.error('[ClearBill AI] QR Code generation error:', err);
       setQrError('Failed to generate machine-readable QR code. ' + (err?.message || ''));
@@ -148,15 +173,24 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
     generateRealQrCode();
   }, [generateRealQrCode]);
 
-  // Countdown timer for 30s guest quick session
+  // 30-Second Automatic Close Timer: returns cashier back to POS / billing for next customer
   useEffect(() => {
-    if (sessionExpired || countdown <= 0 || loading) return;
+    if (loading || error || isTimerPaused) return;
+
+    if (countdown <= 0) {
+      if (onBackToBilling) {
+        onBackToBilling();
+      }
+      return;
+    }
 
     const timer = setInterval(() => {
       setCountdown(prev => {
         if (prev <= 1) {
           clearInterval(timer);
-          setSessionExpired(true);
+          if (onBackToBilling) {
+            onBackToBilling();
+          }
           return 0;
         }
         return prev - 1;
@@ -164,7 +198,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [countdown, sessionExpired, loading]);
+  }, [countdown, isTimerPaused, loading, error, onBackToBilling]);
 
   const handleClaimReceipt = async () => {
     setClaimLoading(true);
@@ -194,10 +228,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
   };
 
   const getFullReceiptUrl = () => {
-    if (typeof window !== 'undefined' && window.location.origin) {
-      return `${window.location.origin}/receipt/${receiptToken}`;
-    }
-    return `/receipt/${receiptToken}`;
+    return buildPublicReceiptUrl(receiptToken);
   };
 
   const handleCopyLink = () => {
@@ -208,6 +239,23 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
         setTimeout(() => setCopiedLink(false), 2500);
       });
     }
+  };
+
+  const handleSaveCustomUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (customUrlInput.trim()) {
+      localStorage.setItem('cb_public_app_url', customUrlInput.trim());
+      setActiveBaseUrl(customUrlInput.trim());
+      setShowUrlConfigModal(false);
+      generateRealQrCode();
+    }
+  };
+
+  const handleResetCustomUrl = () => {
+    localStorage.removeItem('cb_public_app_url');
+    setActiveBaseUrl(getPublicAppBaseUrl());
+    setShowUrlConfigModal(false);
+    generateRealQrCode();
   };
 
   if (loading) {
@@ -223,9 +271,11 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
   if (error || !receiptData) {
     return (
       <div className="max-w-md mx-auto bg-white border border-[#E2E8F0] rounded-2xl p-6 text-center space-y-4 shadow-sm mt-6">
-        <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto ${
-          isExpiredError ? 'bg-amber-100 text-amber-600' : 'bg-rose-100 text-rose-600'
-        }`}>
+        <div
+          className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto ${
+            isExpiredError ? 'bg-amber-100 text-amber-600' : 'bg-rose-100 text-rose-600'
+          }`}
+        >
           <AlertTriangle className="w-7 h-7" />
         </div>
         <div>
@@ -237,8 +287,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
           </p>
           {isExpiredError && (
             <p className="text-[11px] text-slate-500 mt-2 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
-              For privacy and fraud prevention, unauthenticated guest tokens expire after 24 hours.
-              If you claimed this receipt, please sign in to your Customer Account Vault to view it anytime.
+              For privacy and fraud prevention, unauthenticated guest tokens expire after 24 hours. If you claimed this receipt, please sign in to your Customer Account Vault to view it anytime.
             </p>
           )}
         </div>
@@ -247,7 +296,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
           {onBackToBilling && (
             <button
               onClick={onBackToBilling}
-              className="w-full sm:w-auto px-4 py-2 bg-[#172B4D] hover:bg-[#263449] text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+              className="w-full sm:w-auto px-4 py-2 bg-[#172B4D] hover:bg-[#263449] text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
             >
               Return to Billing
             </button>
@@ -255,7 +304,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
           {onPromptAuth && (
             <button
               onClick={onPromptAuth}
-              className="w-full sm:w-auto px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#16A34A] border border-emerald-200 text-xs font-semibold rounded-lg transition-colors"
+              className="w-full sm:w-auto px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#16A34A] border border-emerald-200 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
             >
               Customer Vault Sign In
             </button>
@@ -275,10 +324,13 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
       })
     : '24 hours from creation';
 
+  const isLocalhost = isLocalhostOrigin();
+  const isAiStudio = isAiStudioDevOrigin();
+
   return (
     <div className="max-w-xl mx-auto space-y-5 pb-12">
-      {/* Top Controls & Navigation */}
-      <div className="flex items-center justify-between">
+      {/* Top Controls & 30-Second Auto-Close Notification */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         {onBackToBilling ? (
           <button
             onClick={onBackToBilling}
@@ -290,11 +342,20 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
         ) : (
           <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
             <ShieldCheck className="w-4 h-4 text-[#16A34A]" />
-            <span>ClearBill Verified Receipt</span>
+            <span>ClearBill Verified Digital Receipt</span>
           </div>
         )}
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowUrlConfigModal(true)}
+            className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+            title="Configure public domain or Wi-Fi IP for phone scanning"
+          >
+            <Settings2 className="w-3.5 h-3.5 text-slate-600" />
+            <span>QR URL Settings</span>
+          </button>
+
           <button
             onClick={handlePrint}
             className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer transition-colors"
@@ -305,31 +366,63 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
         </div>
       </div>
 
-      {/* 30-Second Guest Viewing Timer Alert */}
-      <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center justify-between text-xs text-emerald-900">
-        <div className="flex items-center gap-2">
-          <Clock className="w-4 h-4 text-[#16A34A] shrink-0" />
-          <span>
-            {sessionExpired
-              ? 'Guest quick-view session timer concluded.'
-              : `Temporary Guest Session: ${countdown}s remaining`}
-          </span>
+      {/* 30-Second POS Auto-Close Status Banner */}
+      {onBackToBilling && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs text-emerald-950 shadow-2xs">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-xs">
+              {countdown}s
+            </div>
+            <div>
+              <span className="font-bold text-emerald-900 block">
+                {isTimerPaused
+                  ? 'Auto-Close Paused'
+                  : `Closing automatically in ${countdown}s for next customer bill`}
+              </span>
+              <span className="text-[11px] text-emerald-700">
+                Customer has 30 seconds to scan the digital receipt QR code.
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsTimerPaused(!isTimerPaused)}
+              className="px-2.5 py-1 bg-white border border-emerald-300 text-emerald-800 text-[11px] font-semibold rounded-md shadow-2xs hover:bg-emerald-50 flex items-center gap-1 cursor-pointer"
+            >
+              {isTimerPaused ? (
+                <>
+                  <Play className="w-3 h-3 text-emerald-600" />
+                  <span>Resume Timer</span>
+                </>
+              ) : (
+                <>
+                  <Pause className="w-3 h-3 text-amber-600" />
+                  <span>Pause Timer</span>
+                </>
+              )}
+            </button>
+
+            <button
+              onClick={onBackToBilling}
+              className="px-3 py-1 bg-[#16A34A] hover:bg-[#15803D] text-white text-[11px] font-bold rounded-md shadow-xs flex items-center gap-1 cursor-pointer"
+            >
+              <span>Next Bill Now</span>
+            </button>
+          </div>
         </div>
-        {sessionExpired ? (
-          <button
-            onClick={() => {
-              setCountdown(30);
-              setSessionExpired(false);
-            }}
-            className="px-2.5 py-1 bg-[#16A34A] text-white text-[11px] font-semibold rounded-md shadow-xs hover:bg-[#15803D] cursor-pointer"
-          >
-            Reopen Session (Token Active)
-          </button>
-        ) : (
-          <span className="font-mono text-emerald-700 font-bold tabular-nums">
-            00:{countdown.toString().padStart(2, '0')}
-          </span>
-        )}
+      )}
+
+      {/* QR Code Domain Protection Notice (Highlights how Google 403 was solved) */}
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 px-3 flex items-center justify-between text-[11px] text-slate-600">
+        <div className="flex items-center gap-1.5 truncate">
+          <Globe className="w-3.5 h-3.5 text-[#16A34A] shrink-0" />
+          <span className="text-slate-500">QR Scannable Domain:</span>
+          <span className="font-mono text-slate-800 font-medium truncate">{activeBaseUrl}</span>
+        </div>
+        <span className="text-[10px] bg-emerald-100 text-emerald-800 font-semibold px-2 py-0.5 rounded-full shrink-0">
+          Mobile Ready
+        </span>
       </div>
 
       {/* Main Digital Receipt Card */}
@@ -340,7 +433,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
             <Leaf className="w-4 h-4 text-[#16A34A]" />
             <span>Confirmed 100% Paperless Digital Receipt</span>
           </div>
-          <span className="font-bold text-[11px]">+2.5g Paper Saved</span>
+          <span className="font-bold text-[11px]">+2.5g Thermal Paper Saved</span>
         </div>
 
         {/* Store Header */}
@@ -456,7 +549,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
                 <span className="text-xs font-medium">{qrError}</span>
                 <button
                   onClick={generateRealQrCode}
-                  className="mt-2 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-md flex items-center gap-1.5"
+                  className="mt-2 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-md flex items-center gap-1.5 cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>Retry</span>
@@ -476,7 +569,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
           <div className="space-y-1">
             <p className="text-sm font-bold text-[#172B4D]">Scan with your phone camera</p>
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Point your smartphone camera to instantly view, verify, or download this receipt on any device.
+              Point your smartphone camera to instantly open and view this verified receipt on any device.
             </p>
           </div>
 
@@ -486,7 +579,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
               href={fullUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="px-3.5 py-1.5 bg-[#172B4D] hover:bg-[#263449] text-white text-xs font-semibold rounded-lg shadow-xs flex items-center gap-1.5 transition-colors"
+              className="px-3.5 py-1.5 bg-[#172B4D] hover:bg-[#203a66] text-white text-xs font-semibold rounded-lg shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <ExternalLink className="w-3.5 h-3.5" />
               <span>View Digital Receipt</span>
@@ -540,6 +633,82 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
           )}
         </div>
       </div>
+
+      {/* QR URL Settings Dialog */}
+      {showUrlConfigModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Globe className="w-5 h-5 text-[#16A34A]" />
+                <h3 className="text-base font-bold text-[#172B4D]">QR Code Public Base URL</h3>
+              </div>
+              <button
+                onClick={() => setShowUrlConfigModal(false)}
+                className="text-slate-400 hover:text-slate-600 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-600 space-y-2">
+              <p>
+                <strong>Why did Google 403 happen?</strong>
+                <br />
+                Google AI Studio’s developer URL (<code className="bg-slate-100 px-1 py-0.5 rounded">ais-dev-*.run.app</code>) requires your private Google account login.
+                ClearBill AI now automatically uses the public Shared URL (<code className="bg-slate-100 px-1 py-0.5 rounded">ais-pre-*.run.app</code>) so mobile phones can scan without permissions.
+              </p>
+
+              {isLocalhost && (
+                <p className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-amber-900">
+                  <strong>Localhost Testing Notice:</strong> Your computer is running on <code className="font-bold">localhost</code>. Another mobile phone on the same Wi-Fi network cannot resolve "localhost". Enter your computer's local Wi-Fi IP address below (e.g. <code className="font-bold">http://192.168.1.15:3000</code>).
+                </p>
+              )}
+            </div>
+
+            <form onSubmit={handleSaveCustomUrl} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Public Base URL (Origin)
+                </label>
+                <input
+                  type="url"
+                  placeholder="e.g. http://192.168.1.15:3000 or https://yourdomain.com"
+                  value={customUrlInput || activeBaseUrl}
+                  onChange={e => setCustomUrlInput(e.target.value)}
+                  className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-2">
+                <button
+                  type="button"
+                  onClick={handleResetCustomUrl}
+                  className="text-xs text-slate-500 hover:text-slate-800 underline cursor-pointer"
+                >
+                  Reset to Auto-Detected
+                </button>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowUrlConfigModal(false)}
+                    className="px-3 py-1.5 border border-slate-200 text-slate-700 text-xs font-semibold rounded-lg hover:bg-slate-50 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-3.5 py-1.5 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg shadow-xs cursor-pointer"
+                  >
+                    Apply & Regenerate QR
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
