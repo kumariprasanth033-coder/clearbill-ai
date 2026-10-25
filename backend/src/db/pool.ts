@@ -222,6 +222,25 @@ export interface ReceiptEntity {
   }[];
 }
 
+export interface PaymentAttemptEntity {
+  id: string;
+  transaction_id?: string;
+  receipt_id?: string;
+  customer_user_id?: string;
+  payee_vpa: string;
+  payee_name: string;
+  amount: number;
+  currency: string;
+  transaction_ref: string;
+  notes?: string;
+  status: 'pending' | 'verified' | 'failed';
+  payment_method: 'upi';
+  upi_payload: string;
+  verified_at?: string;
+  merchant_verification_source?: string;
+  created_at: string;
+}
+
 // Initial In-Memory Store populated with demo products and test barcodes
 class Store {
   companies: CompanyEntity[] = [
@@ -335,6 +354,16 @@ class Store {
 
   users = [
     {
+      id: 'usr-adm-01',
+      company_id: 'cmp-demo-01',
+      email: 'admin@clearbill.ai',
+      phone: '+91 98765 00000',
+      password: 'clearbill123',
+      full_name: 'ClearBill System Admin',
+      role: 'admin' as const,
+      is_active: true,
+    },
+    {
       id: 'usr-mgr-01',
       company_id: 'cmp-demo-01',
       email: 'manager@clearbill.ai',
@@ -361,6 +390,16 @@ class Store {
       phone: '+91 98765 43213',
       password: 'clearbill123',
       full_name: 'Amit Kumar',
+      role: 'customer' as const,
+      is_active: true,
+    },
+    {
+      id: 'usr-cus-02',
+      company_id: 'cmp-demo-01',
+      email: 'customer2@clearbill.ai',
+      phone: '+91 98765 43219',
+      password: 'clearbill123',
+      full_name: 'Pooja Verma',
       role: 'customer' as const,
       is_active: true,
     },
@@ -585,6 +624,27 @@ class Store {
   claimedReceipts: { id: string; customer_user_id: string; receipt_id: string; claimed_at: string }[] = [
     { id: 'clm-01', customer_user_id: 'usr-cus-01', receipt_id: 'rcpt-002', claimed_at: new Date().toISOString() }
   ];
+
+  paymentAttempts: PaymentAttemptEntity[] = [
+    {
+      id: 'pay-001',
+      transaction_id: 'tx-002',
+      receipt_id: 'rcpt-002',
+      customer_user_id: 'usr-cus-01',
+      payee_vpa: 'annapurna.retail@okhdfcbank',
+      payee_name: 'Annapurna Retail & Tea Lounge',
+      amount: 484.00,
+      currency: 'INR',
+      transaction_ref: 'CB-2026-1002',
+      notes: 'Tea & Groceries Bill',
+      status: 'verified',
+      payment_method: 'upi',
+      upi_payload: 'upi://pay?pa=annapurna.retail@okhdfcbank&pn=Annapurna%20Retail%20%26%20Tea%20Lounge&am=484.00&cu=INR&tr=CB-2026-1002',
+      verified_at: new Date(Date.now() - 3600000).toISOString(),
+      merchant_verification_source: 'Sandbox Test Gateway',
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+    }
+  ];
 }
 
 export const inMemoryStore = new Store();
@@ -750,6 +810,90 @@ export async function addProduct(product: Partial<ProductEntity>): Promise<Produ
       );
     } catch (err) {
       console.warn('[DB] MySQL addProduct failed, added to local store:', err);
+    }
+  }
+
+  inMemoryStore.products.push(newProduct);
+  return newProduct;
+}
+
+export async function registerScannedProduct(product: {
+  company_id: string;
+  outlet_id?: string;
+  barcode: string;
+  product_name: string;
+  unit_price: number;
+  cost_price?: number;
+  tax_rate?: number;
+  category?: string;
+  unit?: string;
+  description?: string;
+}): Promise<ProductEntity> {
+  const cleanBarcode = (product.barcode || '').trim();
+  const cleanName = (product.product_name || '').trim();
+  const price = Number(product.unit_price);
+
+  if (!cleanBarcode) {
+    throw new Error('Barcode is required for product registration.');
+  }
+  if (!cleanName) {
+    throw new Error('Product name is required.');
+  }
+  if (isNaN(price) || price <= 0) {
+    throw new Error('A valid selling price greater than 0 is required.');
+  }
+
+  // Duplicate Check / Concurrency Guard:
+  // If this barcode was already registered for this business, return the existing product record.
+  const existing = await lookupProductByBarcode(product.company_id, cleanBarcode);
+  if (existing) {
+    return existing;
+  }
+
+  const newProduct: ProductEntity = {
+    id: `prod-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    company_id: product.company_id || 'cmp-demo-01',
+    outlet_id: product.outlet_id || 'out-demo-01',
+    product_name: cleanName,
+    barcode: cleanBarcode,
+    sku: `SKU-${cleanBarcode.slice(-6)}`,
+    category: (product.category || 'General').trim(),
+    unit: (product.unit || 'pcs').trim(),
+    unit_price: price,
+    cost_price: Number(product.cost_price) || 0,
+    tax_rate: Number(product.tax_rate) !== undefined && !isNaN(Number(product.tax_rate)) ? Number(product.tax_rate) : 5,
+    description: (product.description || '').trim(),
+    is_quick_bill_item: false,
+    quick_bill_order: 0,
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  if (isRealMysqlConnected && pool) {
+    try {
+      await pool.query(
+        `INSERT INTO products (id, company_id, outlet_id, product_name, barcode, sku, category, unit, unit_price, cost_price, tax_rate, description, is_quick_bill_item, quick_bill_order, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          newProduct.id,
+          newProduct.company_id,
+          newProduct.outlet_id,
+          newProduct.product_name,
+          newProduct.barcode,
+          newProduct.sku,
+          newProduct.category,
+          newProduct.unit,
+          newProduct.unit_price,
+          newProduct.cost_price,
+          newProduct.tax_rate,
+          newProduct.description,
+          0,
+          0,
+        ]
+      );
+    } catch (err) {
+      console.warn('[DB] MySQL registerScannedProduct failed, added to local store:', err);
     }
   }
 
@@ -1067,17 +1211,45 @@ export async function getReceiptByToken(token: string) {
   return null;
 }
 
+export async function isReceiptClaimedByCustomer(receiptId: string, customerUserId: string): Promise<boolean> {
+  return inMemoryStore.claimedReceipts.some(
+    c => c.receipt_id === receiptId && c.customer_user_id === customerUserId
+  );
+}
+
+export async function getCustomerReceiptById(receiptIdOrToken: string, customerUserId: string) {
+  // Check if claimed by this customer
+  const rcpt = inMemoryStore.receipts.find(
+    r => r.id === receiptIdOrToken || r.tokens.some(t => t.token === receiptIdOrToken)
+  );
+  if (!rcpt) return null;
+
+  const isClaimed = inMemoryStore.claimedReceipts.some(
+    c => c.receipt_id === rcpt.id && c.customer_user_id === customerUserId
+  );
+  if (!isClaimed) return null;
+
+  const tx = inMemoryStore.transactions.find(t => t.id === rcpt.transaction_id);
+  return { receipt: rcpt, transaction: tx };
+}
+
 export async function claimCustomerReceipt(token: string, customerUserId: string) {
   for (const rcpt of inMemoryStore.receipts) {
     const t = rcpt.tokens.find(tok => tok.token === token);
     if (t) {
       t.is_claimed = true;
-      inMemoryStore.claimedReceipts.push({
-        id: `clm-${Date.now()}`,
-        customer_user_id: customerUserId,
-        receipt_id: rcpt.id,
-        claimed_at: new Date().toISOString(),
-      });
+      // Prevent duplicate claims
+      const alreadyClaimed = inMemoryStore.claimedReceipts.some(
+        c => c.customer_user_id === customerUserId && c.receipt_id === rcpt.id
+      );
+      if (!alreadyClaimed) {
+        inMemoryStore.claimedReceipts.push({
+          id: `clm-${Date.now()}`,
+          customer_user_id: customerUserId,
+          receipt_id: rcpt.id,
+          claimed_at: new Date().toISOString(),
+        });
+      }
       return true;
     }
   }
@@ -1283,6 +1455,203 @@ export async function logSecurityAudit(log: SecurityAuditLog) {
 
 export async function getSecurityAuditLogs(companyId: string) {
   return inMemoryStore.securityAuditLogs.filter(l => l.company_id === companyId);
+}
+
+/**
+ * UPI Payments and Payment Attempt Lifecycle
+ */
+export async function createPaymentAttempt(
+  data: Omit<PaymentAttemptEntity, 'id' | 'created_at'>
+): Promise<PaymentAttemptEntity> {
+  const attempt: PaymentAttemptEntity = {
+    id: `pay-${Date.now()}`,
+    ...data,
+    created_at: new Date().toISOString(),
+  };
+  inMemoryStore.paymentAttempts.unshift(attempt);
+  return attempt;
+}
+
+export async function getPaymentAttemptById(id: string): Promise<PaymentAttemptEntity | null> {
+  return inMemoryStore.paymentAttempts.find(p => p.id === id || p.transaction_ref === id) || null;
+}
+
+export async function getPaymentAttemptsByCustomer(customerUserId: string): Promise<PaymentAttemptEntity[]> {
+  return inMemoryStore.paymentAttempts.filter(p => p.customer_user_id === customerUserId);
+}
+
+export async function verifyPaymentAttempt(
+  id: string,
+  verifiedStatus: 'verified' | 'failed' = 'verified',
+  source: string = 'Merchant Bank Gateway'
+): Promise<{ success: boolean; attempt: PaymentAttemptEntity | null; transaction?: TransactionEntity; receipt?: ReceiptEntity }> {
+  const attempt = inMemoryStore.paymentAttempts.find(p => p.id === id || p.transaction_ref === id);
+  if (!attempt) return { success: false, attempt: null };
+
+  attempt.status = verifiedStatus;
+  attempt.merchant_verification_source = source;
+  if (verifiedStatus === 'verified') {
+    attempt.verified_at = new Date().toISOString();
+  }
+
+  let transaction: TransactionEntity | undefined;
+  let receipt: ReceiptEntity | undefined;
+
+  // If tied to an existing transaction, update payment_status
+  if (attempt.transaction_id) {
+    transaction = inMemoryStore.transactions.find(t => t.id === attempt.transaction_id);
+    if (transaction) {
+      transaction.payment_status = verifiedStatus;
+      transaction.payment_method = 'upi';
+    }
+  } else if (attempt.transaction_ref) {
+    transaction = inMemoryStore.transactions.find(t => t.transaction_number === attempt.transaction_ref || t.id === attempt.transaction_ref);
+    if (transaction) {
+      transaction.payment_status = verifiedStatus;
+      transaction.payment_method = 'upi';
+      attempt.transaction_id = transaction.id;
+    }
+  }
+
+  // If verified and standalone UPI payment with no transaction yet, create authoritative ledger transaction
+  if (!transaction && verifiedStatus === 'verified') {
+    const txId = `tx-upi-${Date.now()}`;
+    const now = new Date().toISOString();
+    transaction = {
+      id: txId,
+      company_id: 'cmp-demo-01',
+      outlet_id: 'out-demo-01',
+      user_id: 'usr-ret-01',
+      transaction_number: attempt.transaction_ref?.startsWith('CB-') ? attempt.transaction_ref : `CB-UPI-${Math.floor(1000 + Math.random() * 9000)}`,
+      status: 'completed',
+      subtotal: attempt.amount,
+      discount_amount: 0,
+      tax_amount: 0,
+      grand_total: attempt.amount,
+      payment_method: 'upi',
+      payment_status: 'verified',
+      customer_name: 'Walk-in UPI Customer',
+      notes: attempt.notes || 'Verified UPI Payment QR Settlement',
+      finalized_at: now,
+      created_at: now,
+      items: [
+        {
+          id: `txi-upi-${Date.now()}`,
+          transaction_id: txId,
+          product_name: attempt.notes || 'Retail Purchase via UPI QR',
+          quantity: 1,
+          unit_price: attempt.amount,
+          tax_rate: 0,
+          tax_amount: 0,
+          discount_amount: 0,
+          line_total: attempt.amount,
+        },
+      ],
+    };
+    inMemoryStore.transactions.unshift(transaction);
+    attempt.transaction_id = txId;
+  }
+
+  // Find or generate digital receipt if verified and transaction exists
+  if (transaction && verifiedStatus === 'verified') {
+    receipt = inMemoryStore.receipts.find(r => r.transaction_id === transaction?.id);
+    if (!receipt) {
+      const rcptId = `rcpt-${Date.now()}`;
+      const guestToken = `tok-upi-${Math.random().toString(36).substring(2, 9)}`;
+      receipt = {
+        id: rcptId,
+        transaction_id: transaction.id,
+        receipt_number: `RCP-U${Math.floor(100000 + Math.random() * 900000)}`,
+        qr_code_data: `/receipt/${guestToken}`,
+        receipt_url: `/receipt/${guestToken}`,
+        receipt_token: guestToken,
+        paper_print_avoided: true,
+        paper_grams_saved: 2.5,
+        created_at: new Date().toISOString(),
+        tokens: [
+          {
+            id: `tok-${Date.now()}`,
+            token: guestToken,
+            viewing_session_seconds: 30,
+            expires_at: new Date(Date.now() + 86400000).toISOString(),
+            is_claimed: false,
+          },
+        ],
+      };
+      inMemoryStore.receipts.unshift(receipt);
+    }
+    attempt.receipt_id = receipt.id;
+  }
+
+  return { success: true, attempt, transaction, receipt };
+}
+
+/**
+ * Customer Registration
+ */
+export async function registerCustomerUser(data: {
+  fullName: string;
+  email: string;
+  phone?: string;
+  password: string;
+}): Promise<{ user: any; token: string }> {
+  const cleanEmail = data.email.trim().toLowerCase();
+  const existing = inMemoryStore.users.find(u => u.email.toLowerCase() === cleanEmail);
+  if (existing) {
+    throw new Error('An account with this email address already exists.');
+  }
+
+  const userId = `usr-cus-${Date.now()}`;
+  const newUser = {
+    id: userId,
+    company_id: 'cmp-demo-01',
+    email: cleanEmail,
+    phone: data.phone ? data.phone.trim() : '',
+    password: data.password,
+    full_name: data.fullName.trim(),
+    role: 'customer' as const,
+    is_active: true,
+  };
+
+  inMemoryStore.users.push(newUser);
+  const token = `cb_sess_${userId}_${Date.now()}`;
+
+  return {
+    user: {
+      id: newUser.id,
+      email: newUser.email,
+      fullName: newUser.full_name,
+      phone: newUser.phone,
+      role: newUser.role,
+    },
+    token,
+  };
+}
+
+/**
+ * Admin Helpers (Data Sanitization & No Banking Secret Exposure)
+ */
+export async function getAllCompaniesForAdmin(): Promise<CompanyEntity[]> {
+  return inMemoryStore.companies.map(c => ({
+    ...c,
+  }));
+}
+
+export async function getAllUsersForAdmin(): Promise<any[]> {
+  // Strip passwords for admin view
+  return inMemoryStore.users.map(u => ({
+    id: u.id,
+    company_id: u.company_id,
+    email: u.email,
+    phone: u.phone,
+    full_name: u.full_name,
+    role: u.role,
+    is_active: u.is_active,
+  }));
+}
+
+export async function getAllSecurityAuditLogsForAdmin(): Promise<SecurityAuditLog[]> {
+  return inMemoryStore.securityAuditLogs;
 }
 
 export default pool;

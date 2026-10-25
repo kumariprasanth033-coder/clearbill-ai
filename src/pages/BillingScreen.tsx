@@ -38,6 +38,7 @@ import {
   Tag,
 } from 'lucide-react';
 import { BrowserMultiFormatReader, BarcodeFormat, DecodeHintType } from '@zxing/library';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 import { Product, CartItem, BillingFieldConfig } from '../types.ts';
 
 interface BillingScreenProps {
@@ -137,14 +138,14 @@ export const BillingScreen: React.FC<BillingScreenProps> = ({
 
   // Fetch product list
   useEffect(() => {
-    fetch('/api/products')
+    fetch('/api/products', { headers: getAuthHeaders('retailer') })
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data)) setProducts(data);
       })
       .catch(console.error);
 
-    fetch('/api/billing-fields')
+    fetch('/api/billing-fields', { headers: getAuthHeaders('retailer') })
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data)) setFieldConfigs(data);
@@ -193,7 +194,9 @@ export const BillingScreen: React.FC<BillingScreenProps> = ({
       setLastScannedCode(cleanBarcode);
 
       try {
-        const res = await fetch(`/api/products/lookup/${encodeURIComponent(cleanBarcode)}`);
+        const res = await fetch(`/api/products/lookup/${encodeURIComponent(cleanBarcode)}`, {
+          headers: getAuthHeaders('retailer'),
+        });
         const data = await res.json();
 
         if (res.ok && data.found && data.product) {
@@ -561,7 +564,10 @@ export const BillingScreen: React.FC<BillingScreenProps> = ({
     try {
       const res = await fetch('/api/billing/checkout', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getAuthHeaders('retailer') as Record<string, string>),
+        },
         body: JSON.stringify(payload),
       });
 

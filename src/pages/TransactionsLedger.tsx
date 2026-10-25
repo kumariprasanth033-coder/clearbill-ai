@@ -17,6 +17,7 @@ import {
   Banknote,
 } from 'lucide-react';
 import { Transaction } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 interface TransactionsLedgerProps {
   onOpenReceipt: (token: string) => void;
@@ -29,7 +30,7 @@ export const TransactionsLedger: React.FC<TransactionsLedgerProps> = ({ onOpenRe
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/transactions')
+    fetch('/api/transactions', { headers: getAuthHeaders('retailer') })
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data)) setTransactions(data);

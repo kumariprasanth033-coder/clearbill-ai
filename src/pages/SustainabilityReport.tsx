@@ -6,12 +6,13 @@
 import React, { useState, useEffect } from 'react';
 import { Leaf, Award, Trees, Droplet, Wind, ShieldCheck, Sparkles } from 'lucide-react';
 import { DashboardMetrics } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 export const SustainabilityReport: React.FC = () => {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
 
   useEffect(() => {
-    fetch('/api/dashboard/metrics')
+    fetch('/api/dashboard/metrics', { headers: getAuthHeaders('manager') })
       .then(r => r.json())
       .then(setMetrics)
       .catch(console.error);

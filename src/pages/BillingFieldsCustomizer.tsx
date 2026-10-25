@@ -15,6 +15,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { BillingFieldConfig } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 export const BillingFieldsCustomizer: React.FC = () => {
   const [configs, setConfigs] = useState<BillingFieldConfig[]>([]);
@@ -22,7 +23,7 @@ export const BillingFieldsCustomizer: React.FC = () => {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
-    fetch('/api/billing/configs')
+    fetch('/api/billing-fields', { headers: getAuthHeaders('manager') })
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data)) setConfigs(data);
@@ -62,7 +63,10 @@ export const BillingFieldsCustomizer: React.FC = () => {
     try {
       const res = await fetch('/api/billing/configs', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getAuthHeaders('manager') as Record<string, string>),
+        },
         body: JSON.stringify({ companyId: 'cmp-demo-01', configs }),
       });
       if (res.ok) {

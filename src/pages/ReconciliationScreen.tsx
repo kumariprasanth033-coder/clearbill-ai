@@ -6,12 +6,13 @@
 import React, { useState, useEffect } from 'react';
 import { Scale, CheckCircle2, AlertTriangle, CreditCard, Banknote, QrCode } from 'lucide-react';
 import { DashboardMetrics } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 export const ReconciliationScreen: React.FC = () => {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
 
   useEffect(() => {
-    fetch('/api/dashboard/metrics')
+    fetch('/api/dashboard/metrics', { headers: getAuthHeaders('manager') })
       .then(r => r.json())
       .then(setMetrics)
       .catch(console.error);

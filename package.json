@@ -9,7 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "test": "tsx tests/manual-and-barcode-billing.test.ts",
+    "test": "tsx tests/manual-and-barcode-billing.test.ts && tsx tests/security-role-isolation.test.ts && tsx tests/customer-upi-rbac.test.ts && tsx tests/customer-scanning-redesign.test.ts && tsx tests/universal-barcode-scanning.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

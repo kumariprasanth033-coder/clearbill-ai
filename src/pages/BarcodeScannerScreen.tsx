@@ -1,19 +1,14 @@
 /**
- * ClearBill AI - High-Performance Physical Camera Barcode Scanner
+ * ClearBill AI - Universal High-Performance Barcode Scanner
  *
- * Performance Optimizations:
- * 1. Unified requestAnimationFrame Loop:
- *    - Replaces uncontrolled setInterval callbacks with a single requestAnimationFrame loop.
- *    - Unifies both Native GPU BarcodeDetector and fallback ZXing engine under one RAF runner.
- * 2. Throttled Camera Stream Processing:
- *    - Throttles frame sampling to ~15 FPS (66ms cadence) to prevent CPU/GPU thread saturation.
- *    - Automatically throttles down to 250ms while a product lookup is in flight.
- *    - Pauses redundant frame decoding during network roundtrips to improve frame-to-lookup response time.
- * 3. Batched Atomic State Updates (Anti-Jank):
- *    - Replaces continuous individual React state updates with a consolidated atomic scan state.
- *    - Zero unnecessary component re-renders during video panning/aiming.
- * 4. Zero-Latency In-Memory LRU Cache:
- *    - Resolves repeated barcodes in 0ms without server roundtrips.
+ * Implements:
+ * 1. Automatic Barcode Detection (EAN-13, EAN-8, UPC-A, UPC-E, Code 128)
+ * 2. Search MySQL Product Catalogue First
+ * 3. Automatically Identify Unknown Products (via Open Food Facts API & Global Registry)
+ * 4. Automatic First-Time Registration with Retailer Selling Price Confirmation
+ * 5. Manual Registration Fallback for Unidentified Barcodes (with pre-filled barcode)
+ * 6. Concurrency & Duplicate Guards
+ * 7. Real-time Telemetry (Decode Time, DB Lookup Time, Cycle Time)
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
@@ -41,8 +36,14 @@ import {
   X,
   Package,
   Gauge,
+  Tag,
+  ShieldCheck,
+  Globe,
+  DollarSign,
+  ArrowRight,
 } from 'lucide-react';
 import { Product } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 interface BarcodeScannerScreenProps {
   onAddToCart?: (product: Product) => void;
@@ -57,10 +58,20 @@ interface PerformanceMetrics {
   totalCycleMs: number;
 }
 
-// Consolidated atomic scan state to eliminate continuous re-render churn
+interface ExternalProductMeta {
+  barcode: string;
+  product_name: string;
+  brand?: string;
+  category: string;
+  unit: string;
+  package_size?: string;
+  manufacturer?: string;
+}
+
 interface AtomicScanState {
   scannedBarcode: string | null;
   matchedProduct: Product | null;
+  externalIdentified: ExternalProductMeta | null;
   lookupLoading: boolean;
   lookupError: string | null;
 }
@@ -76,10 +87,11 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
   const animFrameIdRef = useRef<number | null>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Consolidated atomic scan state (single re-render per result)
+  // Consolidated atomic scan state
   const [scanState, setScanState] = useState<AtomicScanState>({
     scannedBarcode: null,
     matchedProduct: null,
+    externalIdentified: null,
     lookupLoading: false,
     lookupError: null,
   });
@@ -103,24 +115,30 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
   // Client-side instant lookup cache (0ms for repeat scans)
   const productCacheRef = useRef<Map<string, Product>>(new Map());
 
-  // Quick Register Product Modal state for unknown barcodes
-  const [regModalOpen, setRegModalOpen] = useState(false);
-  const [regBarcode, setRegBarcode] = useState('');
-  const [regName, setRegName] = useState('');
-  const [regPrice, setRegPrice] = useState('');
-  const [regCategory, setRegCategory] = useState('Groceries');
-  const [regTaxRate, setRegTaxRate] = useState('5');
-  const [regLoading, setRegLoading] = useState(false);
+  // First-Time Registration Modal for Externally Identified Products
+  const [confirmPriceModalOpen, setConfirmPriceModalOpen] = useState(false);
+  const [confirmPrice, setConfirmPrice] = useState('');
+  const [confirmTaxRate, setConfirmTaxRate] = useState('5');
+  const [confirmRegisterLoading, setConfirmRegisterLoading] = useState(false);
+  const [confirmRegisterError, setConfirmRegisterError] = useState<string | null>(null);
 
-  // Throttling and in-flight processing locks (Refs prevent re-rendering during frame loop)
+  // Manual Product Registration Modal for Unidentified Barcodes
+  const [manualModalOpen, setManualModalOpen] = useState(false);
+  const [manualBarcode, setManualBarcode] = useState('');
+  const [manualName, setManualName] = useState('');
+  const [manualPrice, setManualPrice] = useState('');
+  const [manualCategory, setManualCategory] = useState('Groceries');
+  const [manualTaxRate, setManualTaxRate] = useState('5');
+  const [manualUnit, setManualUnit] = useState('pcs');
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+
+  // Throttling and in-flight processing locks
   const lastScannedCodeRef = useRef<string | null>(null);
   const lastScanTimeRef = useRef<number>(0);
   const isProcessingRef = useRef<boolean>(false);
-  const lastFrameProcessTimeRef = useRef<number>(0);
 
   // Frame processing constants
-  const FRAME_THROTTLE_MS = 66; // ~15 FPS optimal scanning rate
-  const IN_FLIGHT_THROTTLE_MS = 250; // Throttle down when processing lookup
   const DUPLICATE_GUARD_MS = 900; // 900ms guard allows rapid cashier workflow
 
   // Play synthesized Web Audio beep on successful decode (<1ms)
@@ -139,12 +157,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
       gain.connect(audioCtx.destination);
       osc.start();
       osc.stop(audioCtx.currentTime + 0.08);
-    } catch {
-      // Audio optional
-    }
+    } catch {}
   };
 
-  // Perform backend / cache product lookup with batched state resolution
+  // Perform backend / cache product lookup with universal resolution
   const handleBarcodeDetected = useCallback(
     async (rawBarcode: string, decodeElapsedMs = 10) => {
       const cleanBarcode = rawBarcode.trim();
@@ -160,20 +176,21 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
       }
 
       if (isProcessingRef.current) {
-        return; // Skip duplicate frame while previous lookup is resolving
+        return;
       }
 
-      // Immediately acquire in-flight processing lock to throttle stream
       isProcessingRef.current = true;
       lastScannedCodeRef.current = cleanBarcode;
       lastScanTimeRef.current = now;
 
       playBeep();
 
-      // Set initial loading state atomically
+      // Set initial loading state
       setScanState(prev => ({
         ...prev,
         scannedBarcode: cleanBarcode,
+        matchedProduct: null,
+        externalIdentified: null,
         lookupLoading: true,
         lookupError: null,
       }));
@@ -186,10 +203,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
         const lookupElapsedMs = Math.round(performance.now() - lookupStartTime);
         const totalMs = Math.round(decodeElapsedMs + lookupElapsedMs);
 
-        // Batched single state update
         setScanState({
           scannedBarcode: cleanBarcode,
           matchedProduct: cached,
+          externalIdentified: null,
           lookupLoading: false,
           lookupError: null,
         });
@@ -214,20 +231,23 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
         return;
       }
 
+      // Universal Server-side Lookup (MySQL first, then External Product Database)
       try {
-        const res = await fetch(`/api/products/lookup/${encodeURIComponent(cleanBarcode)}`);
+        const res = await fetch(`/api/products/lookup/${encodeURIComponent(cleanBarcode)}`, {
+          headers: getAuthHeaders('retailer'),
+        });
         const data = await res.json();
         const lookupElapsedMs = Math.round(performance.now() - lookupStartTime);
         const totalMs = Math.round(decodeElapsedMs + lookupElapsedMs);
 
+        // CASE 1: Found in MySQL store catalogue
         if (res.ok && data.found && data.product) {
-          // Cache for instant repeat scans
           productCacheRef.current.set(cleanBarcode, data.product);
 
-          // Batched atomic update on match
           setScanState({
             scannedBarcode: cleanBarcode,
             matchedProduct: data.product,
+            externalIdentified: null,
             lookupLoading: false,
             lookupError: null,
           });
@@ -240,13 +260,31 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
           if (onAddToCart) {
             onAddToCart(data.product);
           }
-        } else {
-          // Batched atomic update on product not found
+        }
+        // CASE 2: Not in MySQL, but identified from External Product Database
+        else if (data.externalFound && data.externalProduct) {
           setScanState({
             scannedBarcode: cleanBarcode,
             matchedProduct: null,
+            externalIdentified: data.externalProduct,
             lookupLoading: false,
-            lookupError: data.message || 'Barcode detected, but this product is not registered in your store catalogue.',
+            lookupError: null,
+          });
+
+          // Pre-fill price confirmation modal
+          setConfirmPrice('');
+          setConfirmTaxRate('5');
+          setConfirmRegisterError(null);
+          setConfirmPriceModalOpen(true);
+        }
+        // CASE 3: Not found in MySQL and not found in External Database
+        else {
+          setScanState({
+            scannedBarcode: cleanBarcode,
+            matchedProduct: null,
+            externalIdentified: null,
+            lookupLoading: false,
+            lookupError: data.message || 'Product information not found in store catalogue or external database.',
           });
 
           setScanHistory(prev => [
@@ -265,7 +303,7 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
         setScanState(prev => ({
           ...prev,
           lookupLoading: false,
-          lookupError: 'Network or database connection failure: ' + err.message,
+          lookupError: 'Lookup error: ' + err.message,
         }));
       } finally {
         isProcessingRef.current = false;
@@ -274,7 +312,140 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
     [onAddToCart]
   );
 
-  // Initialize Native BarcodeDetector if available in browser
+  // Handle price confirmation and automatic first-time registration for externally identified product
+  const handleConfirmPriceAndRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const external = scanState.externalIdentified;
+    if (!external) return;
+
+    const price = parseFloat(confirmPrice);
+    if (isNaN(price) || price <= 0) {
+      setConfirmRegisterError('Please enter a valid retailer selling price greater than ₹0.');
+      return;
+    }
+
+    setConfirmRegisterLoading(true);
+    setConfirmRegisterError(null);
+
+    try {
+      const res = await fetch('/api/products/register-scanned', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders('retailer'),
+        },
+        body: JSON.stringify({
+          barcode: external.barcode,
+          product_name: external.product_name,
+          category: external.category || 'General',
+          unit: external.unit || 'pcs',
+          unit_price: price,
+          tax_rate: parseFloat(confirmTaxRate) || 5,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.product) {
+        // Cache the newly registered product
+        productCacheRef.current.set(external.barcode, data.product);
+
+        setScanState({
+          scannedBarcode: external.barcode,
+          matchedProduct: data.product,
+          externalIdentified: null,
+          lookupLoading: false,
+          lookupError: null,
+        });
+
+        setConfirmPriceModalOpen(false);
+
+        // Add to active cart immediately
+        if (onAddToCart) {
+          onAddToCart(data.product);
+        }
+
+        setScanHistory(prev => [
+          { barcode: external.barcode, product: data.product, timestamp: new Date().toLocaleTimeString() },
+          ...prev.slice(0, 9),
+        ]);
+      } else {
+        setConfirmRegisterError(data.error || 'Failed to register product.');
+      }
+    } catch (err: any) {
+      setConfirmRegisterError(err.message || 'Network error registering product.');
+    } finally {
+      setConfirmRegisterLoading(false);
+    }
+  };
+
+  // Handle manual product registration when barcode is unknown anywhere
+  const handleManualRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualName.trim() || !manualBarcode.trim()) {
+      setManualError('Product name and barcode are required.');
+      return;
+    }
+
+    const price = parseFloat(manualPrice);
+    if (isNaN(price) || price <= 0) {
+      setManualError('Please enter a valid selling price greater than ₹0.');
+      return;
+    }
+
+    setManualLoading(true);
+    setManualError(null);
+
+    try {
+      const res = await fetch('/api/products/register-scanned', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders('retailer'),
+        },
+        body: JSON.stringify({
+          barcode: manualBarcode.trim(),
+          product_name: manualName.trim(),
+          category: manualCategory,
+          unit: manualUnit,
+          unit_price: price,
+          tax_rate: parseFloat(manualTaxRate) || 5,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.product) {
+        productCacheRef.current.set(manualBarcode.trim(), data.product);
+
+        setScanState({
+          scannedBarcode: manualBarcode.trim(),
+          matchedProduct: data.product,
+          externalIdentified: null,
+          lookupLoading: false,
+          lookupError: null,
+        });
+
+        setManualModalOpen(false);
+
+        // Add to active cart immediately without re-scanning
+        if (onAddToCart) {
+          onAddToCart(data.product);
+        }
+
+        setScanHistory(prev => [
+          { barcode: manualBarcode.trim(), product: data.product, timestamp: new Date().toLocaleTimeString() },
+          ...prev.slice(0, 9),
+        ]);
+      } else {
+        setManualError(data.error || 'Failed to register product.');
+      }
+    } catch (err: any) {
+      setManualError(err.message || 'Network error registering product.');
+    } finally {
+      setManualLoading(false);
+    }
+  };
+
+  // Initialize Native BarcodeDetector if available
   const initBarcodeDetector = () => {
     if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
       try {
@@ -283,41 +454,146 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
         setPerfMetrics(prev => ({ ...prev, engine: 'Native GPU (BarcodeDetector)' }));
         return true;
       } catch (err) {
-        console.info('[Scanner] Native BarcodeDetector initialization fallback to ZXing:', err);
+        console.info('[Scanner] BarcodeDetector fallback to ZXing:', err);
       }
     }
     return false;
   };
 
-  // Helper to decode frame via ZXing without internal setInterval churn
+  // Decode frame via ZXing without internal setInterval churn
   const decodeFrameZXing = (video: HTMLVideoElement): string | null => {
     if (!offscreenCanvasRef.current) {
       offscreenCanvasRef.current = document.createElement('canvas');
     }
 
     const canvas = offscreenCanvasRef.current;
-    const vWidth = video.videoWidth || 640;
-    const vHeight = video.videoHeight || 480;
+    const width = video.videoWidth || 640;
+    const height = video.videoHeight || 480;
 
-    // Center crop 70% width, 50% height for 3x faster binarization
-    const cropWidth = Math.floor(vWidth * 0.7);
-    const cropHeight = Math.floor(vHeight * 0.5);
-    const cropX = Math.floor((vWidth - cropWidth) / 2);
-    const cropY = Math.floor((vHeight - cropHeight) / 2);
-
-    if (canvas.width !== cropWidth || canvas.height !== cropHeight) {
-      canvas.width = cropWidth;
-      canvas.height = cropHeight;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
     }
 
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
 
-    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-    const imgData = ctx.getImageData(0, 0, cropWidth, cropHeight);
+    ctx.drawImage(video, 0, 0, width, height);
+    const imageData = ctx.getImageData(0, 0, width, height);
 
     try {
-      if (!codeReaderRef.current) {
+      const luminanceSource = new RGBLuminanceSource(imageData.data, width, height);
+      const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+
+      if (codeReaderRef.current) {
+        const result = (codeReaderRef.current as any).decodeBitmap(binaryBitmap);
+        if (result && result.getText()) {
+          return result.getText();
+        }
+      }
+    } catch {
+      // Normal frame without barcode
+    }
+    return null;
+  };
+
+  // Main unified frame processing loop
+  const processVideoFrame = useCallback(
+    async (timestamp: number) => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || video.paused) {
+        animFrameIdRef.current = requestAnimationFrame(processVideoFrame);
+        return;
+      }
+
+      if (isProcessingRef.current) {
+        animFrameIdRef.current = requestAnimationFrame(processVideoFrame);
+        return;
+      }
+
+      const decodeStart = performance.now();
+
+      // 1. Native GPU BarcodeDetector
+      if (nativeDetectorRef.current) {
+        try {
+          const barcodes = await nativeDetectorRef.current.detect(video);
+          if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+            const decodeElapsedMs = Math.round(performance.now() - decodeStart);
+            handleBarcodeDetected(barcodes[0].rawValue, decodeElapsedMs);
+          }
+        } catch {
+          // Fallback to ZXing
+        }
+      } else {
+        // 2. High-performance ZXing
+        const detected = decodeFrameZXing(video);
+        if (detected) {
+          const decodeElapsedMs = Math.round(performance.now() - decodeStart);
+          handleBarcodeDetected(detected, decodeElapsedMs);
+        }
+      }
+
+      animFrameIdRef.current = requestAnimationFrame(processVideoFrame);
+    },
+    [handleBarcodeDetected]
+  );
+
+  // Stop camera tracks cleanly
+  const stopCamera = () => {
+    if (animFrameIdRef.current) {
+      cancelAnimationFrame(animFrameIdRef.current);
+      animFrameIdRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsScanning(false);
+  };
+
+  // Start camera stream
+  const startCamera = async (deviceId?: string) => {
+    const initStart = performance.now();
+    setCameraError(null);
+    stopCamera();
+
+    try {
+      const constraints: MediaStreamConstraints = {
+        video: deviceId
+          ? { deviceId: { exact: deviceId } }
+          : {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+        audio: false,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      mediaStreamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+
+        const cameraInitMs = Math.round(performance.now() - initStart);
+        setPerfMetrics(prev => ({ ...prev, cameraInitMs }));
+        setIsScanning(true);
+
+        // List cameras
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        setAvailableDevices(videoDevices);
+        if (!selectedDeviceId && videoDevices.length > 0) {
+          setSelectedDeviceId(videoDevices[0].deviceId);
+        }
+
+        initBarcodeDetector();
+
+        // Initialize ZXing reader
         const hints = new Map();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [
           BarcodeFormat.EAN_13,
@@ -326,170 +602,22 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
           BarcodeFormat.UPC_E,
           BarcodeFormat.CODE_128,
         ]);
-        codeReaderRef.current = new BrowserMultiFormatReader(hints);
-      }
+        hints.set(DecodeHintType.TRY_HARDER, true);
+        codeReaderRef.current = new BrowserMultiFormatReader(hints, 80);
 
-      const luminanceSource = new RGBLuminanceSource(imgData.data, cropWidth, cropHeight);
-      const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-      const result = codeReaderRef.current.decodeBitmap(binaryBitmap);
-      return result ? result.getText() : null;
-    } catch {
-      return null; // Frame miss is normal during panning
-    }
-  };
-
-  // Unified requestAnimationFrame Loop with Camera Stream Throttling
-  const runCameraProcessingLoop = useCallback(() => {
-    if (!videoRef.current || !isScanning) return;
-
-    const video = videoRef.current;
-
-    // Check video readiness
-    if (video.readyState >= 2 && !video.paused) {
-      const now = performance.now();
-      // Throttle interval adapts: 66ms normally, 250ms when lookup is in-flight
-      const activeThrottle = isProcessingRef.current ? IN_FLIGHT_THROTTLE_MS : FRAME_THROTTLE_MS;
-
-      if (now - lastFrameProcessTimeRef.current >= activeThrottle) {
-        lastFrameProcessTimeRef.current = now;
-
-        if (!isProcessingRef.current) {
-          const decodeStart = performance.now();
-
-          // 1. Primary: Native GPU BarcodeDetector
-          if (nativeDetectorRef.current) {
-            nativeDetectorRef.current
-              .detect(video)
-              .then((barcodes: any[]) => {
-                if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
-                  const decodeMs = Math.round(performance.now() - decodeStart);
-                  handleBarcodeDetected(barcodes[0].rawValue, decodeMs);
-                }
-              })
-              .catch(() => {});
-          } else {
-            // 2. Fallback: Optimized Throttled ZXing Frame Binarizer
-            const detectedCode = decodeFrameZXing(video);
-            if (detectedCode) {
-              const decodeMs = Math.round(performance.now() - decodeStart);
-              handleBarcodeDetected(detectedCode, decodeMs);
-            }
-          }
-        }
-      }
-    }
-
-    // Schedule next frame in animation loop
-    animFrameIdRef.current = requestAnimationFrame(runCameraProcessingLoop);
-  }, [handleBarcodeDetected, isScanning]);
-
-  // Start Camera with optimal resolution and rear-camera priority
-  const startCamera = async (deviceId?: string) => {
-    setCameraError(null);
-    const cameraStartTime = performance.now();
-
-    try {
-      stopCamera();
-
-      // Optimal 720p constraints avoid 4K bandwidth overhead
-      const videoConstraints: MediaTrackConstraints = {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1280, max: 1920 },
-        height: { ideal: 720, max: 1080 },
-      };
-
-      if (deviceId) {
-        (videoConstraints as any).deviceId = { exact: deviceId };
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
-        audio: false,
-      });
-
-      mediaStreamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-
-        const cameraReadyMs = Math.round(performance.now() - cameraStartTime);
-        setPerfMetrics(prev => ({ ...prev, cameraInitMs: cameraReadyMs }));
-        setIsScanning(true);
-
-        // Check for native GPU BarcodeDetector first
-        initBarcodeDetector();
-
-        // Start unified requestAnimationFrame processing loop
-        animFrameIdRef.current = requestAnimationFrame(runCameraProcessingLoop);
-      }
-
-      // Query devices for camera switch list (async in background)
-      if (navigator.mediaDevices.enumerateDevices) {
-        navigator.mediaDevices.enumerateDevices().then(devices => {
-          const videoDevs = devices.filter(d => d.kind === 'videoinput');
-          setAvailableDevices(videoDevs);
-          if (deviceId) {
-            setSelectedDeviceId(deviceId);
-          } else if (videoDevs.length > 0) {
-            const backCam = videoDevs.find(d =>
-              d.label.toLowerCase().includes('back') ||
-              d.label.toLowerCase().includes('rear') ||
-              d.label.toLowerCase().includes('environment')
-            );
-            setSelectedDeviceId(backCam ? backCam.deviceId : videoDevs[0].deviceId);
-          }
-        });
+        animFrameIdRef.current = requestAnimationFrame(processVideoFrame);
       }
     } catch (err: any) {
-      console.error('[Scanner Init Error]', err);
-      if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
-        setCameraError({
-          type: 'PERMISSION_DENIED',
-          message: 'Camera permission denied. Please allow camera access in your browser to scan physical barcodes.',
-        });
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setCameraError({
-          type: 'UNAVAILABLE',
-          message: 'No physical camera hardware detected on this device.',
-        });
-      } else {
-        setCameraError({
-          type: 'GENERAL_ERROR',
-          message: 'Camera initialization failed: ' + (err.message || 'Unknown error'),
-        });
-      }
+      console.warn('[Camera Init Notice]', err);
+      setCameraError({
+        type: err.name === 'NotAllowedError' ? 'PERMISSION_DENIED' : 'UNAVAILABLE',
+        message:
+          err.name === 'NotAllowedError'
+            ? 'Camera permission denied. Please allow camera access in browser settings.'
+            : err.message || 'Camera is in use by another application or unavailable.',
+      });
       setIsScanning(false);
     }
-  };
-
-  const stopCamera = () => {
-    if (animFrameIdRef.current) {
-      cancelAnimationFrame(animFrameIdRef.current);
-      animFrameIdRef.current = null;
-    }
-
-    if (codeReaderRef.current) {
-      try {
-        codeReaderRef.current.reset();
-      } catch {}
-      codeReaderRef.current = null;
-    }
-
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => {
-        try {
-          track.stop();
-        } catch {}
-      });
-      mediaStreamRef.current = null;
-    }
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-
-    setIsScanning(false);
   };
 
   useEffect(() => {
@@ -516,50 +644,7 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
     }
   };
 
-  const handleQuickRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!regName.trim() || !regBarcode.trim()) return;
-    setRegLoading(true);
-
-    try {
-      const res = await fetch('/api/products', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          product_name: regName.trim(),
-          barcode: regBarcode.trim(),
-          category: regCategory,
-          unit_price: parseFloat(regPrice) || 0,
-          tax_rate: parseFloat(regTaxRate) || 0,
-          unit: 'pcs',
-        }),
-      });
-
-      const data = await res.json();
-      if (res.ok && data.id) {
-        // Cache the newly registered product
-        productCacheRef.current.set(regBarcode.trim(), data);
-        setScanState({
-          scannedBarcode: regBarcode.trim(),
-          matchedProduct: data,
-          lookupLoading: false,
-          lookupError: null,
-        });
-        setRegModalOpen(false);
-        setRegName('');
-        setRegPrice('');
-        if (onAddToCart) {
-          onAddToCart(data);
-        }
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setRegLoading(false);
-    }
-  };
-
-  const { scannedBarcode, matchedProduct, lookupLoading, lookupError } = scanState;
+  const { scannedBarcode, matchedProduct, externalIdentified, lookupLoading, lookupError } = scanState;
 
   return (
     <div className="space-y-6">
@@ -568,10 +653,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
         <div>
           <h2 className="text-lg font-bold text-[#172B4D] flex items-center gap-2">
             <Camera className="w-5 h-5 text-[#16A34A]" />
-            Continuous Retail Barcode Scanner
+            Universal Barcode Scanner & Product Lookup
           </h2>
           <p className="text-xs text-[#64748B] mt-0.5">
-            Supported Formats: EAN-13, EAN-8, UPC-A, UPC-E, Code 128. Throttled RAF loop with zero state-churn architecture.
+            Auto-detects EAN-13, EAN-8, UPC-A, UPC-E, Code 128. Instant MySQL lookup with global catalog identification.
           </p>
         </div>
 
@@ -621,24 +706,24 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
           <Gauge className="w-4 h-4 text-[#16A34A]" />
           <span className="font-bold text-emerald-900">Scanner Engine:</span>
           <span className="bg-white border border-emerald-300 text-emerald-800 font-semibold px-2 py-0.5 rounded text-[11px]">
-            {perfMetrics.engine} (Throttled RAF)
+            {perfMetrics.engine}
           </span>
         </div>
 
         <div className="flex items-center gap-4 text-emerald-950 font-mono text-[11px]">
           <div>
-            <span className="text-emerald-700 font-sans">Camera Ready: </span>
+            <span className="text-emerald-700 font-sans">Camera: </span>
             <span className="font-bold">{perfMetrics.cameraInitMs}ms</span>
           </div>
           <div>
-            <span className="text-emerald-700 font-sans">Decode Time: </span>
+            <span className="text-emerald-700 font-sans">Decode: </span>
             <span className="font-bold">{perfMetrics.lastDecodeMs}ms</span>
           </div>
           <div>
-            <span className="text-emerald-700 font-sans">DB Lookup: </span>
+            <span className="text-emerald-700 font-sans">Lookup: </span>
             <span className="font-bold">{perfMetrics.lastLookupMs}ms</span>
           </div>
-          <div className="bg-emerald-600 text-white px-2 py-0.5 rounded font-sans font-bold">
+          <div className="bg-[#16A34A] text-white px-2 py-0.5 rounded font-sans font-bold">
             Total Cycle: {perfMetrics.totalCycleMs}ms
           </div>
         </div>
@@ -649,7 +734,6 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
         <div className="lg:col-span-7 space-y-4">
           <div className="bg-white border border-[#E2E8F0] rounded-xl overflow-hidden shadow-xs relative">
             <div className="relative w-full h-[360px] md:h-[420px] bg-slate-900 flex items-center justify-center overflow-hidden">
-              {/* Video Element for live camera feed */}
               <video
                 ref={videoRef}
                 className="w-full h-full object-cover"
@@ -658,7 +742,7 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                 autoPlay
               />
 
-              {/* Scanning Target Reticle & Visual Green Detection Frame */}
+              {/* Viewfinder Target Reticle */}
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center p-6">
                 <div
                   className={`relative w-64 md:w-80 h-44 rounded-xl border-2 transition-colors duration-300 ${
@@ -667,24 +751,23 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                       : 'border-white/70'
                   }`}
                 >
-                  {/* Corner Target Accents */}
                   <div className="absolute -top-1 -left-1 w-5 h-5 border-t-4 border-l-4 border-[#16A34A] rounded-tl" />
                   <div className="absolute -top-1 -right-1 w-5 h-5 border-t-4 border-r-4 border-[#16A34A] rounded-tr" />
                   <div className="absolute -bottom-1 -left-1 w-5 h-5 border-b-4 border-l-4 border-[#16A34A] rounded-bl" />
                   <div className="absolute -bottom-1 -right-1 w-5 h-5 border-b-4 border-r-4 border-[#16A34A] rounded-br" />
 
-                  {/* Horizontal Aiming Laser Guide */}
+                  {/* Horizontal Red Laser Line */}
                   <div className="absolute top-1/2 left-2 right-2 h-0.5 bg-red-500/80 shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
 
                   <div className="absolute bottom-2 left-0 right-0 text-center">
                     <span className="text-[11px] font-medium text-white/90 bg-black/60 px-2 py-0.5 rounded">
-                      Align barcode within frame
+                      Align any retail barcode within frame
                     </span>
                   </div>
                 </div>
               </div>
 
-              {/* Camera Error Fallback Card */}
+              {/* Camera Error Banner */}
               {cameraError && (
                 <div className="absolute inset-0 bg-slate-900/90 text-white p-6 flex flex-col items-center justify-center text-center">
                   <AlertCircle className="w-12 h-12 text-rose-500 mb-3" />
@@ -692,9 +775,6 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                     {cameraError.type === 'PERMISSION_DENIED' ? 'Camera Permission Required' : 'Camera Unavailable'}
                   </h4>
                   <p className="text-xs text-slate-300 max-w-md mb-4">{cameraError.message}</p>
-                  <p className="text-[11px] text-slate-400 mb-4">
-                    Tip: Use the Manual Barcode Entry below or tap any test barcode to simulate scanning instantly.
-                  </p>
                   <button
                     onClick={() => startCamera(selectedDeviceId)}
                     className="px-4 py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg shadow-sm cursor-pointer"
@@ -709,11 +789,11 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
             <div className="p-3 bg-slate-50 border-t border-[#E2E8F0] flex items-center justify-between text-xs text-slate-600">
               <div className="flex items-center gap-2">
                 <span className={`w-2 h-2 rounded-full ${isScanning ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
-                <span>{isScanning ? 'Continuous Throttled Scanner Active (15 FPS)' : 'Scanner Paused'}</span>
+                <span>{isScanning ? 'Continuous Barcode Scanner Active' : 'Scanner Paused'}</span>
               </div>
               <div className="flex items-center gap-2">
                 <Volume2 className="w-3.5 h-3.5 text-[#16A34A]" />
-                <span className="text-[11px] text-slate-500">Audio Feedback: ON</span>
+                <span className="text-[11px] text-slate-500">Audio Chime: ON</span>
               </div>
             </div>
           </div>
@@ -721,12 +801,12 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
           {/* Manual Barcode Input Fallback */}
           <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-xs">
             <h3 className="text-xs font-semibold text-slate-800 uppercase tracking-wider mb-2">
-              Manual Barcode Lookup
+              Manual Barcode Fallback
             </h3>
             <form onSubmit={handleManualSearch} className="flex gap-2">
               <input
                 type="text"
-                placeholder="Enter EAN-13, EAN-8, UPC or SKU (e.g. 8901030383786)"
+                placeholder="Enter EAN-13, EAN-8, UPC or SKU (e.g. 8901058852332)"
                 value={manualInput}
                 onChange={e => setManualInput(e.target.value)}
                 className="flex-1 bg-white border border-[#E2E8F0] rounded-lg px-3 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:border-[#16A34A]"
@@ -742,12 +822,12 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Scan Result Card & Quick Test Barcodes */}
+        {/* Right Column: Scan Result Card & Test Barcodes */}
         <div className="lg:col-span-5 space-y-4">
           {/* Active Result Card */}
           <div className="bg-white border border-[#E2E8F0] rounded-xl p-5 shadow-xs">
             <h3 className="text-sm font-bold text-[#172B4D] mb-3 flex items-center justify-between">
-              <span>Latest Detection Result</span>
+              <span>Detection Result</span>
               {scannedBarcode && (
                 <span className="text-[11px] font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold">
                   {scannedBarcode}
@@ -758,9 +838,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
             {lookupLoading ? (
               <div className="py-8 text-center text-slate-500 space-y-2">
                 <RefreshCw className="w-6 h-6 animate-spin mx-auto text-[#16A34A]" />
-                <p className="text-xs">Querying database for matching barcode...</p>
+                <p className="text-xs">Searching store catalogue and global product registry...</p>
               </div>
             ) : matchedProduct ? (
+              /* CASE 1: Registered Product Match */
               <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-3">
                 <div className="flex items-start justify-between gap-2">
                   <div>
@@ -779,13 +860,13 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
 
                 <div className="pt-2 border-t border-emerald-200 flex items-center justify-between">
                   <div>
-                    <span className="text-xs text-slate-500">Registered Price:</span>
+                    <span className="text-xs text-slate-500">Retail Selling Price:</span>
                     <p className="text-lg font-bold text-slate-900 tabular-nums">
                       ₹{matchedProduct.unit_price.toFixed(2)}
                     </p>
                   </div>
                   <div className="text-right">
-                    <span className="text-xs text-slate-500">Applicable GST:</span>
+                    <span className="text-xs text-slate-500">Tax Rate:</span>
                     <p className="text-sm font-semibold text-slate-700 tabular-nums">
                       {matchedProduct.tax_rate}%
                     </p>
@@ -798,19 +879,61 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                     className="flex-1 py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer active:scale-98"
                   >
                     <Plus className="w-4 h-4" />
-                    <span>Add Another (+1)</span>
+                    <span>Increment Quantity (+1)</span>
                   </button>
                   {onNavigateToBilling && (
                     <button
                       onClick={onNavigateToBilling}
                       className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
                     >
-                      Go to Checkout
+                      View Bill
                     </button>
                   )}
                 </div>
               </div>
+            ) : externalIdentified ? (
+              /* CASE 2: Unknown in Store, but Identified Externally */
+              <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <Globe className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-[10px] font-bold text-blue-800 uppercase tracking-wider block">
+                      Product Identified in Global Registry
+                    </span>
+                    <h4 className="text-sm font-bold text-slate-900 mt-0.5">
+                      {externalIdentified.product_name}
+                    </h4>
+                    <p className="text-xs text-slate-600">
+                      Brand: {externalIdentified.brand || 'Retail Brand'} · Category: {externalIdentified.category}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-white border border-blue-200 rounded-lg text-xs space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold text-blue-900">
+                    <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+                    <span>First-Time Product Registration Required</span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">
+                    Product identity verified. Enter your store's selling price to save it to your MySQL catalogue and add it to the bill.
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setConfirmPrice('');
+                    setConfirmTaxRate('5');
+                    setConfirmRegisterError(null);
+                    setConfirmPriceModalOpen(true);
+                  }}
+                  className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <DollarSign className="w-3.5 h-3.5" />
+                  <span>Set Selling Price & Register</span>
+                </button>
+              </div>
             ) : lookupError ? (
+              /* CASE 3: Not Found Anywhere */
               <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
                 <div className="flex items-start gap-2.5">
                   <FileQuestion className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
@@ -819,22 +942,19 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                     <p className="text-xs text-amber-800 mt-1">{lookupError}</p>
                   </div>
                 </div>
-                <div className="flex gap-2 pt-2">
+                <div className="pt-2">
                   <button
                     onClick={() => {
-                      setRegBarcode(scannedBarcode || '');
-                      setRegModalOpen(true);
+                      setManualBarcode(scannedBarcode || '');
+                      setManualName('');
+                      setManualPrice('');
+                      setManualError(null);
+                      setManualModalOpen(true);
                     }}
-                    className="flex-1 py-1.5 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1 cursor-pointer"
+                    className="w-full py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Quick Register Product</span>
-                  </button>
-                  <button
-                    onClick={() => setManualInput(scannedBarcode || '')}
-                    className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
-                  >
-                    Edit / Search
+                    <span>Add Product Manually (Pre-filled Barcode)</span>
                   </button>
                 </div>
               </div>
@@ -842,196 +962,294 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
               <div className="py-10 text-center text-slate-400 space-y-2">
                 <ScanLine className="w-8 h-8 mx-auto text-slate-300" />
                 <p className="text-xs">Hold any physical product barcode in front of the camera.</p>
+                <p className="text-[11px] text-slate-400">
+                  Known items are added to the bill instantly; unknown items are identified and registered on first scan.
+                </p>
               </div>
             )}
           </div>
 
-          {/* Known Test Barcodes (Click to simulate scan instantly) */}
-          <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-xs">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-[#16A34A]" />
-                Registered Test Barcodes (In Database)
-              </h3>
-              <span className="text-[10px] text-slate-400">Click to Simulate Scan</span>
-            </div>
+          {/* Quick Real Barcode Test Samples */}
+          <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-xs space-y-2.5">
+            <h4 className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+              <span>Universal Barcode Test Samples:</span>
+            </h4>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <button
+                onClick={() => handleBarcodeDetected('8901030383786', 5)}
+                className="p-2 rounded-lg border border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/50 text-left transition-colors cursor-pointer"
+              >
+                <span className="block font-bold text-slate-800 text-[11px]">Tata Tea Gold (EAN-13)</span>
+                <span className="text-[10px] text-slate-500 font-mono">8901030383786 · In MySQL</span>
+              </button>
 
-            <div className="space-y-2">
-              {[
-                { name: 'Tata Tea Gold 250g', code: '8901030383786', format: 'EAN-13', price: '₹165.00' },
-                { name: 'Amul Pure Ghee 500ml', code: '8901233024823', format: 'EAN-13', price: '₹315.00' },
-                { name: 'Parle-G Gold Biscuits', code: '8901499026418', format: 'EAN-13', price: '₹120.00' },
-                { name: 'ClearBill Mint Tin', code: '50123456', format: 'EAN-8', price: '₹50.00' },
-                { name: 'Organic Honey (Leading 0)', code: '012345678905', format: 'UPC-A', price: '₹240.00' },
-                { name: 'Stainless Flask 750ml', code: 'CB-RETAIL-1001', format: 'Code 128', price: '₹699.00' },
-              ].map(item => (
-                <div
-                  key={item.code}
-                  onClick={() => handleBarcodeDetected(item.code, 2)}
-                  className="cursor-pointer p-2.5 rounded-lg border border-slate-100 hover:border-[#16A34A] hover:bg-emerald-50/40 transition-all flex items-center justify-between text-xs group"
-                >
-                  <div>
-                    <span className="font-semibold text-slate-800 group-hover:text-[#16A34A] block">{item.name}</span>
-                    <span className="text-[11px] font-mono text-slate-500">
-                      {item.format} · {item.code}
-                    </span>
-                  </div>
-                  <span className="font-bold text-emerald-700 tabular-nums">{item.price}</span>
-                </div>
-              ))}
+              <button
+                onClick={() => handleBarcodeDetected('8901058852332', 5)}
+                className="p-2 rounded-lg border border-slate-200 hover:border-blue-400 hover:bg-blue-50/50 text-left transition-colors cursor-pointer"
+              >
+                <span className="block font-bold text-slate-800 text-[11px]">Maggi Noodles (EAN-13)</span>
+                <span className="text-[10px] text-blue-600 font-mono">8901058852332 · External</span>
+              </button>
+
+              <button
+                onClick={() => handleBarcodeDetected('8901719101050', 5)}
+                className="p-2 rounded-lg border border-slate-200 hover:border-blue-400 hover:bg-blue-50/50 text-left transition-colors cursor-pointer"
+              >
+                <span className="block font-bold text-slate-800 text-[11px]">Parle-G Biscuits (EAN-13)</span>
+                <span className="text-[10px] text-blue-600 font-mono">8901719101050 · External</span>
+              </button>
+
+              <button
+                onClick={() => handleBarcodeDetected('8909999999999', 5)}
+                className="p-2 rounded-lg border border-slate-200 hover:border-amber-400 hover:bg-amber-50/50 text-left transition-colors cursor-pointer"
+              >
+                <span className="block font-bold text-slate-800 text-[11px]">Unregistered Barcode</span>
+                <span className="text-[10px] text-amber-700 font-mono">8909999999999 · Manual</span>
+              </button>
             </div>
           </div>
-
-          {/* Recent Scans Session Log */}
-          {scanHistory.length > 0 && (
-            <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-xs">
-              <h3 className="text-xs font-semibold text-slate-700 mb-2">Session Scan History</h3>
-              <div className="divide-y divide-slate-100 text-xs">
-                {scanHistory.map((h, i) => (
-                  <div key={i} className="py-2 flex items-center justify-between">
-                    <div>
-                      <span className="font-medium text-slate-800">
-                        {h.product?.product_name || 'Unregistered Barcode'}
-                      </span>
-                      <span className="text-[11px] font-mono text-slate-400 block">{h.barcode}</span>
-                    </div>
-                    <span className="text-[11px] text-slate-400">{h.timestamp}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
-      {/* Quick Register Product Modal Dialog */}
-      {regModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+      {/* ===================================================================== */}
+      {/* MODAL 1: CONFIRM SELLING PRICE FOR EXTERNALLY IDENTIFIED PRODUCT     */}
+      {/* ===================================================================== */}
+      {confirmPriceModalOpen && externalIdentified && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
-                <div className="p-2 bg-emerald-50 text-[#16A34A] rounded-lg">
-                  <Package className="w-5 h-5" />
+                <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
+                  <Globe className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-[#172B4D]">Quick Register Product</h3>
-                  <p className="text-xs text-slate-500">Add unknown barcode directly to your store catalog</p>
+                  <h3 className="text-base font-bold text-[#172B4D]">Register Identified Product</h3>
+                  <p className="text-[11px] text-slate-500 font-mono">Barcode: {externalIdentified.barcode}</p>
                 </div>
               </div>
               <button
-                onClick={() => setRegModalOpen(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+                onClick={() => setConfirmPriceModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleQuickRegister} className="space-y-3.5">
+            {/* Verified External Details */}
+            <div className="p-3 bg-slate-50 rounded-xl space-y-1.5 text-xs text-slate-700">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Scanned Barcode
-                </label>
-                <input
-                  type="text"
-                  value={regBarcode}
-                  onChange={e => setRegBarcode(e.target.value)}
-                  required
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-[#16A34A]"
-                />
+                <span className="text-slate-400 block text-[10px]">Product Name</span>
+                <span className="font-bold text-slate-900 text-sm">{externalIdentified.product_name}</span>
               </div>
+              <div className="flex justify-between text-[11px]">
+                <span>Brand: <strong>{externalIdentified.brand || 'Standard Brand'}</strong></span>
+                <span>Category: <strong>{externalIdentified.category}</strong></span>
+              </div>
+            </div>
 
+            {confirmRegisterError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs">
+                {confirmRegisterError}
+              </div>
+            )}
+
+            {/* Price Form */}
+            <form onSubmit={handleConfirmPriceAndRegister} className="space-y-3 text-xs">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Product Name *
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Britannia Good Day 100g"
-                  value={regName}
-                  onChange={e => setRegName(e.target.value)}
-                  required
-                  className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Category
-                  </label>
-                  <select
-                    value={regCategory}
-                    onChange={e => setRegCategory(e.target.value)}
-                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
-                  >
-                    <option value="Groceries">Groceries</option>
-                    <option value="Dairy">Dairy</option>
-                    <option value="Beverages">Beverages</option>
-                    <option value="Snacks">Snacks</option>
-                    <option value="Bakery">Bakery</option>
-                    <option value="Personal Care">Personal Care</option>
-                    <option value="General">General</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    GST Rate (%)
-                  </label>
-                  <select
-                    value={regTaxRate}
-                    onChange={e => setRegTaxRate(e.target.value)}
-                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
-                  >
-                    <option value="0">0% (Nil)</option>
-                    <option value="5">5% GST</option>
-                    <option value="12">12% GST</option>
-                    <option value="18">18% GST</option>
-                    <option value="28">28% GST</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Selling Price (₹) *
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Retailer Selling Price (₹) <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="number"
                   step="0.01"
-                  min="0.01"
-                  placeholder="0.00"
-                  value={regPrice}
-                  onChange={e => setRegPrice(e.target.value)}
                   required
-                  className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  placeholder="Enter selling price"
+                  value={confirmPrice}
+                  onChange={e => setConfirmPrice(e.target.value)}
+                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base font-bold text-slate-900 focus:outline-none focus:border-[#16A34A]"
+                  autoFocus
                 />
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Product identity was verified. Enter your outlet's selling price to complete registration.
+                </span>
               </div>
 
-              <div className="pt-2 flex items-center justify-end gap-2">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Applicable GST Rate (%)
+                </label>
+                <select
+                  value={confirmTaxRate}
+                  onChange={e => setConfirmTaxRate(e.target.value)}
+                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                >
+                  <option value="0">0% (Exempt)</option>
+                  <option value="5">5% (Standard Groceries)</option>
+                  <option value="12">12% (Processed Goods)</option>
+                  <option value="18">18% (Consumer Goods)</option>
+                  <option value="28">28% (Luxury)</option>
+                </select>
+              </div>
+
+              <div className="pt-2 flex gap-2">
                 <button
                   type="button"
-                  onClick={() => setRegModalOpen(false)}
-                  className="px-4 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                  onClick={() => setConfirmPriceModalOpen(false)}
+                  className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={regLoading}
-                  className="px-4 py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+                  disabled={confirmRegisterLoading}
+                  className="flex-1 py-2 bg-[#16A34A] hover:bg-[#15803D] disabled:opacity-50 text-white font-bold rounded-lg shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  {regLoading ? (
-                    <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Saving...</span>
-                    </>
+                  {confirmRegisterLoading ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
                   ) : (
-                    <>
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Save & Add to Bill</span>
-                    </>
+                    <CheckCircle2 className="w-4 h-4" />
                   )}
+                  <span>Confirm & Add to Bill</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL 2: MANUAL REGISTRATION FOR UNIDENTIFIED BARCODES                */}
+      {/* ===================================================================== */}
+      {manualModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-emerald-100 text-[#16A34A] flex items-center justify-center font-bold">
+                  <Package className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#172B4D]">Manual Product Registration</h3>
+                  <p className="text-[11px] text-slate-500">Save to MySQL catalogue and add to bill</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setManualModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {manualError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs">
+                {manualError}
+              </div>
+            )}
+
+            <form onSubmit={handleManualRegister} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Scanned Barcode <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={manualBarcode}
+                  onChange={e => setManualBarcode(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Product Name <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Fresh Mango 1kg"
+                  value={manualName}
+                  onChange={e => setManualName(e.target.value)}
+                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  autoFocus
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Selling Price (₹) <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    placeholder="0.00"
+                    value={manualPrice}
+                    onChange={e => setManualPrice(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 font-bold text-slate-900 focus:outline-none focus:border-[#16A34A]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    GST Rate (%)
+                  </label>
+                  <select
+                    value={manualTaxRate}
+                    onChange={e => setManualTaxRate(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  >
+                    <option value="0">0%</option>
+                    <option value="5">5%</option>
+                    <option value="12">12%</option>
+                    <option value="18">18%</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Category</label>
+                  <input
+                    type="text"
+                    value={manualCategory}
+                    onChange={e => setManualCategory(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Unit</label>
+                  <input
+                    type="text"
+                    value={manualUnit}
+                    onChange={e => setManualUnit(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setManualModalOpen(false)}
+                  className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={manualLoading}
+                  className="flex-1 py-2 bg-[#16A34A] hover:bg-[#15803D] disabled:opacity-50 text-white font-bold rounded-lg shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {manualLoading ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4" />
+                  )}
+                  <span>Save & Add to Bill</span>
                 </button>
               </div>
             </form>

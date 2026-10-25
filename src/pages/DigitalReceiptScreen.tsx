@@ -51,14 +51,20 @@ import {
 
 interface DigitalReceiptScreenProps {
   receiptToken: string;
+  isCashierView?: boolean;
   onBackToBilling?: () => void;
+  onGoToCustomerHome?: () => void;
+  onCustomerLogin?: () => void;
   onClaimSuccess?: () => void;
   onPromptAuth?: () => void;
 }
 
 export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
   receiptToken,
+  isCashierView = false,
   onBackToBilling,
+  onGoToCustomerHome,
+  onCustomerLogin,
   onClaimSuccess,
   onPromptAuth,
 }) => {
@@ -109,12 +115,23 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
     setError(null);
     setIsExpiredError(false);
 
-    fetch(`/api/receipts/${receiptToken}`)
+    const headers: Record<string, string> = {};
+    if (typeof window !== 'undefined') {
+      try {
+        const customerSess = localStorage.getItem('cb_customer_session');
+        if (customerSess) {
+          const parsed = JSON.parse(customerSess);
+          if (parsed.token) headers['Authorization'] = `Bearer ${parsed.token}`;
+        }
+      } catch (e) {}
+    }
+
+    fetch(`/api/receipts/${receiptToken}`, { headers })
       .then(async res => {
         const data = await res.json();
         if (res.status === 410) {
           setIsExpiredError(true);
-          setError(data.error || 'Receipt viewing token has expired (24-hour viewing window lapsed).');
+          setError(data.error || 'This receipt link has expired. Please log in to your customer account to view a receipt saved to your account.');
           return;
         }
         if (!res.ok) {
@@ -124,7 +141,7 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
         if (data.receipt && data.transaction) {
           setReceiptData(data);
           setCountdown(30);
-          if (data.token?.is_claimed) {
+          if (data.token?.is_claimed || data.accessedViaCustomerVault) {
             setIsClaimed(true);
           }
         } else {
@@ -173,8 +190,9 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
     generateRealQrCode();
   }, [generateRealQrCode]);
 
-  // 30-Second Automatic Close Timer: returns cashier back to POS / billing for next customer
+  // 30-Second Automatic Close Timer: returns cashier back to POS / billing for next customer ONLY in cashier view
   useEffect(() => {
+    if (!isCashierView) return; // NEVER run 30s auto-close on customer view!
     if (loading || error || isTimerPaused) return;
 
     if (countdown <= 0) {
@@ -198,26 +216,58 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [countdown, isTimerPaused, loading, error, onBackToBilling]);
+  }, [countdown, isTimerPaused, loading, error, onBackToBilling, isCashierView]);
 
   const handleClaimReceipt = async () => {
+    // Check if user is logged in
+    let hasSession = false;
+    let customerUserId = 'usr-cus-01';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+    if (typeof window !== 'undefined') {
+      try {
+        const sess = localStorage.getItem('cb_customer_session');
+        if (sess) {
+          const parsed = JSON.parse(sess);
+          if (parsed.user?.id) {
+            customerUserId = parsed.user.id;
+            hasSession = true;
+          }
+          if (parsed.token) headers['Authorization'] = `Bearer ${parsed.token}`;
+        }
+      } catch (e) {}
+    }
+
+    // If logged out: preserve claim context securely in sessionStorage and open login
+    if (!hasSession) {
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem('cb_pending_claim_token', receiptToken);
+      }
+      if (onCustomerLogin) {
+        onCustomerLogin();
+      } else if (onPromptAuth) {
+        onPromptAuth();
+      }
+      return;
+    }
+
     setClaimLoading(true);
     try {
       const res = await fetch(`/api/receipts/${receiptToken}/claim`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customerUserId: 'usr-cus-01' }),
+        headers,
+        body: JSON.stringify({ customerUserId }),
       });
       const data = await res.json();
       if (res.ok) {
         setIsClaimed(true);
         if (onClaimSuccess) onClaimSuccess();
       } else {
-        alert(data.error || 'Failed to claim receipt.');
+        setError(data.error || 'Failed to claim receipt.');
       }
     } catch (err: any) {
       console.error(err);
-      alert('Error claiming receipt: ' + err.message);
+      setError('Error claiming receipt: ' + err.message);
     } finally {
       setClaimLoading(false);
     }
@@ -280,36 +330,66 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
         </div>
         <div>
           <h3 className="text-base font-bold text-[#172B4D]">
-            {isExpiredError ? 'Receipt Security Token Expired' : 'Receipt Access Unavailable'}
+            {isExpiredError ? 'Receipt Link Expired' : 'Receipt Access Unavailable'}
           </h3>
-          <p className="text-xs text-slate-600 mt-2 leading-relaxed">
-            {error || 'The requested digital receipt could not be loaded.'}
+          <p className="text-xs text-slate-700 mt-2 leading-relaxed font-medium">
+            {isExpiredError
+              ? 'This receipt link has expired. Please log in to your customer account to view a receipt saved to your account.'
+              : error || 'The requested digital receipt could not be loaded.'}
           </p>
-          {isExpiredError && (
-            <p className="text-[11px] text-slate-500 mt-2 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
-              For privacy and fraud prevention, unauthenticated guest tokens expire after 24 hours. If you claimed this receipt, please sign in to your Customer Account Vault to view it anytime.
-            </p>
-          )}
         </div>
 
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-2">
-          {onBackToBilling && (
+        {isExpiredError ? (
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-2">
             <button
-              onClick={onBackToBilling}
-              className="w-full sm:w-auto px-4 py-2 bg-[#172B4D] hover:bg-[#263449] text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+              onClick={() => {
+                if (onCustomerLogin) {
+                  onCustomerLogin();
+                } else if (typeof window !== 'undefined') {
+                  window.location.href = '/customer/login';
+                }
+              }}
+              className="w-full sm:w-auto px-4 py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
             >
-              Return to Billing
+              Customer Login
             </button>
-          )}
-          {onPromptAuth && (
             <button
-              onClick={onPromptAuth}
-              className="w-full sm:w-auto px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#16A34A] border border-emerald-200 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+              onClick={() => {
+                if (onGoToCustomerHome) {
+                  onGoToCustomerHome();
+                } else if (typeof window !== 'undefined') {
+                  window.location.href = '/customer/dashboard';
+                }
+              }}
+              className="w-full sm:w-auto px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
             >
-              Customer Vault Sign In
+              Return to Customer Home
             </button>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-2">
+            {isCashierView && onBackToBilling && (
+              <button
+                onClick={onBackToBilling}
+                className="w-full sm:w-auto px-4 py-2 bg-[#172B4D] hover:bg-[#263449] text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+              >
+                Return to Billing
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (onGoToCustomerHome) {
+                  onGoToCustomerHome();
+                } else if (typeof window !== 'undefined') {
+                  window.location.href = '/';
+                }
+              }}
+              className="w-full sm:w-auto px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+            >
+              Return to Home
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -331,13 +411,21 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
     <div className="max-w-xl mx-auto space-y-5 pb-12">
       {/* Top Controls & 30-Second Auto-Close Notification */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        {onBackToBilling ? (
+        {isCashierView && onBackToBilling ? (
           <button
             onClick={onBackToBilling}
             className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>Back to POS Billing</span>
+          </button>
+        ) : onGoToCustomerHome ? (
+          <button
+            onClick={onGoToCustomerHome}
+            className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Back to My Receipts</span>
           </button>
         ) : (
           <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
@@ -366,8 +454,8 @@ export const DigitalReceiptScreen: React.FC<DigitalReceiptScreenProps> = ({
         </div>
       </div>
 
-      {/* 30-Second POS Auto-Close Status Banner */}
-      {onBackToBilling && (
+      {/* 30-Second POS Auto-Close Status Banner (Cashier Station Only) */}
+      {isCashierView && onBackToBilling && (
         <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs text-emerald-950 shadow-2xs">
           <div className="flex items-center gap-2.5">
             <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-xs">

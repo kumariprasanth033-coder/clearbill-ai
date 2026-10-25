@@ -21,6 +21,7 @@ import {
   Shield,
   KeyRound,
 } from 'lucide-react';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 export interface Employee {
   id: string;
@@ -77,7 +78,9 @@ export const EmployeesScreen: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/employees');
+      const res = await fetch('/api/employees', {
+        headers: getAuthHeaders('manager'),
+      });
       if (!res.ok) throw new Error('Failed to load employee directory.');
       const data = await res.json();
       setEmployees(data);
@@ -140,7 +143,10 @@ export const EmployeesScreen: React.FC = () => {
         // Edit / Update
         const res = await fetch(`/api/employees/${editingEmployee.id}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(getAuthHeaders('manager') as Record<string, string>),
+          },
           body: JSON.stringify(formData),
         });
 
@@ -155,7 +161,10 @@ export const EmployeesScreen: React.FC = () => {
         // Add / Create
         const res = await fetch('/api/employees', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(getAuthHeaders('manager') as Record<string, string>),
+          },
           body: JSON.stringify(formData),
         });
 
@@ -184,6 +193,7 @@ export const EmployeesScreen: React.FC = () => {
     try {
       const res = await fetch(`/api/employees/${deleteCandidate.id}`, {
         method: 'DELETE',
+        headers: getAuthHeaders('manager'),
       });
 
       if (!res.ok) {

@@ -18,6 +18,7 @@ import {
   FileSpreadsheet,
 } from 'lucide-react';
 import { Product } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 export const ProductCatalogue: React.FC = () => {
   const [products, setProducts] = useState<Product[]>([]);
@@ -43,7 +44,7 @@ export const ProductCatalogue: React.FC = () => {
 
   const loadProducts = () => {
     setLoading(true);
-    fetch('/api/products')
+    fetch('/api/products', { headers: getAuthHeaders('retailer') })
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data)) setProducts(data);
@@ -97,13 +98,19 @@ export const ProductCatalogue: React.FC = () => {
     if (editingProduct) {
       await fetch(`/api/products/${editingProduct.id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getAuthHeaders('manager') as Record<string, string>),
+        },
         body: JSON.stringify(payload),
       });
     } else {
       await fetch('/api/products', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getAuthHeaders('manager') as Record<string, string>),
+        },
         body: JSON.stringify(payload),
       });
     }
@@ -130,7 +137,10 @@ export const ProductCatalogue: React.FC = () => {
 
     await fetch('/api/products/import-csv', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getAuthHeaders('manager') as Record<string, string>),
+      },
       body: JSON.stringify({ items }),
     });
 

@@ -31,7 +31,7 @@ import {
 import { User, Company, Outlet } from '../types.ts';
 
 interface AuthModalProps {
-  initialRole?: 'manager' | 'retailer' | 'customer';
+  initialRole?: 'manager' | 'retailer' | 'customer' | 'admin';
   isRegistering?: boolean;
   onSuccess: (user: User, company: Company, outlet: Outlet) => void;
   onClose?: () => void;
@@ -44,7 +44,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onClose,
 }) => {
   const [mode, setMode] = useState<'login' | 'register'>(isRegistering ? 'register' : 'login');
-  const [selectedRole, setSelectedRole] = useState<'manager' | 'retailer' | 'customer'>(initialRole);
+  const [selectedRole, setSelectedRole] = useState<'manager' | 'retailer' | 'customer' | 'admin'>(initialRole);
 
   // Login form state
   const [loginEmail, setLoginEmail] = useState(
@@ -52,10 +52,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       ? 'manager@clearbill.ai'
       : initialRole === 'customer'
       ? 'customer@clearbill.ai'
+      : initialRole === 'admin'
+      ? 'admin@clearbill.ai'
       : 'cashier@clearbill.ai'
   );
   const [loginPassword, setLoginPassword] = useState('clearbill123');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
+
+  // Customer registration state
+  const [customerName, setCustomerName] = useState('');
+  const [customerEmail, setCustomerEmail] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [customerPassword, setCustomerPassword] = useState('');
 
   // 5-Step Registration Wizard State
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
@@ -136,10 +144,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleRoleSelect = (role: 'manager' | 'retailer' | 'customer') => {
+  const handleRoleSelect = (role: 'manager' | 'retailer' | 'customer' | 'admin') => {
     setSelectedRole(role);
     if (role === 'manager') setLoginEmail('manager@clearbill.ai');
     else if (role === 'customer') setLoginEmail('customer@clearbill.ai');
+    else if (role === 'admin') setLoginEmail('admin@clearbill.ai');
     else setLoginEmail('cashier@clearbill.ai');
   };
 
@@ -157,12 +166,108 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       const data = await res.json();
       if (res.ok && data.user) {
+        if (data.token && typeof window !== 'undefined') {
+          const sessData = JSON.stringify({
+            token: data.token,
+            user: data.user,
+            company: data.company,
+            outlet: data.outlet,
+          });
+          if (data.user.role === 'customer') {
+            localStorage.setItem('cb_customer_session', sessData);
+
+            // Automatically claim any pending receipt token across authentication
+            const pendingToken = sessionStorage.getItem('cb_pending_claim_token');
+            if (pendingToken) {
+              fetch(`/api/receipts/${pendingToken}/claim`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${data.token}`,
+                },
+                body: JSON.stringify({ customerUserId: data.user.id }),
+              }).catch(console.error);
+              sessionStorage.removeItem('cb_pending_claim_token');
+            }
+          } else if (data.user.role === 'manager') {
+            localStorage.setItem('cb_manager_session', sessData);
+          } else if (data.user.role === 'admin') {
+            localStorage.setItem('cb_admin_session', sessData);
+          } else {
+            localStorage.setItem('cb_retailer_session', sessData);
+          }
+        }
         onSuccess(data.user, data.company, data.outlet);
       } else {
         setError(data.error || 'Authentication failed. Please verify credentials.');
       }
     } catch (err: any) {
       setError('Connection failed: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCustomerRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customerName.trim() || !customerEmail.trim()) {
+      setError('Full name and email are required.');
+      return;
+    }
+    if (customerPassword.length < 6) {
+      setError('Password must contain at least 6 characters.');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/auth/register-customer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: customerName.trim(),
+          email: customerEmail.trim(),
+          phone: customerPhone.trim(),
+          password: customerPassword,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.user) {
+        if (data.token && typeof window !== 'undefined') {
+          const sessData = JSON.stringify({
+            token: data.token,
+            user: data.user,
+            company: { id: 'cmp-demo-01', business_name: 'Annapurna Retail & Tea Lounge' },
+            outlet: { id: 'out-demo-01', outlet_name: 'MG Road Flagship Store' },
+          });
+          localStorage.setItem('cb_customer_session', sessData);
+
+          // Claim any pending receipt token across registration
+          const pendingToken = sessionStorage.getItem('cb_pending_claim_token');
+          if (pendingToken) {
+            fetch(`/api/receipts/${pendingToken}/claim`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${data.token}`,
+              },
+              body: JSON.stringify({ customerUserId: data.user.id }),
+            }).catch(console.error);
+            sessionStorage.removeItem('cb_pending_claim_token');
+          }
+        }
+        onSuccess(
+          data.user,
+          { id: 'cmp-demo-01', business_name: 'Annapurna Retail & Tea Lounge', category: 'grocery_store', owner_name: 'Rajesh Sharma', email: 'manager@clearbill.ai', currency: 'INR', timezone: 'Asia/Kolkata' },
+          { id: 'out-demo-01', company_id: 'cmp-demo-01', outlet_name: 'MG Road Flagship Store', outlet_code: 'BLR-01' }
+        );
+      } else {
+        setError(data.error || 'Failed to create customer account.');
+      }
+    } catch (err: any) {
+      setError('Registration connection error: ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -263,6 +368,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       const data = await res.json();
       if (res.ok && data.user) {
+        if (data.token && typeof window !== 'undefined') {
+          const sessData = JSON.stringify({
+            token: data.token,
+            user: data.user,
+            company: data.company,
+            outlet: data.outlet,
+          });
+          localStorage.setItem('cb_manager_session', sessData);
+        }
         onSuccess(data.user, data.company, data.outlet);
       } else {
         setError(data.error || 'Registration failed. Please check form details.');
@@ -334,11 +448,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <form onSubmit={handleLogin} className="space-y-4 text-xs">
             <div>
               <label className="text-slate-600 font-semibold block mb-1">Select Access Role</label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-1.5 text-center">
                 <button
                   type="button"
                   onClick={() => handleRoleSelect('retailer')}
-                  className={`py-2 px-2 rounded-lg font-semibold text-center border transition-all cursor-pointer ${
+                  className={`py-2 px-1 rounded-lg font-semibold text-center border transition-all cursor-pointer text-[11px] ${
                     selectedRole === 'retailer'
                       ? 'bg-[#16A34A] text-white border-[#16A34A] shadow-xs'
                       : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
@@ -349,24 +463,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <button
                   type="button"
                   onClick={() => handleRoleSelect('manager')}
-                  className={`py-2 px-2 rounded-lg font-semibold text-center border transition-all cursor-pointer ${
+                  className={`py-2 px-1 rounded-lg font-semibold text-center border transition-all cursor-pointer text-[11px] ${
                     selectedRole === 'manager'
                       ? 'bg-[#172033] text-white border-[#172033] shadow-xs'
                       : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
                   }`}
                 >
-                  Store Manager
+                  Manager
                 </button>
                 <button
                   type="button"
                   onClick={() => handleRoleSelect('customer')}
-                  className={`py-2 px-2 rounded-lg font-semibold text-center border transition-all cursor-pointer ${
+                  className={`py-2 px-1 rounded-lg font-semibold text-center border transition-all cursor-pointer text-[11px] ${
                     selectedRole === 'customer'
                       ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
                       : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
                   }`}
                 >
-                  Customer Vault
+                  Customer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRoleSelect('admin')}
+                  className={`py-2 px-1 rounded-lg font-semibold text-center border transition-all cursor-pointer text-[11px] ${
+                    selectedRole === 'admin'
+                      ? 'bg-purple-700 text-white border-purple-700 shadow-xs'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                  }`}
+                >
+                  Admin
                 </button>
               </div>
             </div>
@@ -448,6 +573,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 >
                   Customer (Amit)
                 </button>
+                <span className="text-slate-300">·</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleRoleSelect('admin');
+                    setLoginEmail('admin@clearbill.ai');
+                    setLoginPassword('clearbill123');
+                  }}
+                  className="text-[11px] text-purple-700 hover:underline font-bold cursor-pointer"
+                >
+                  Admin
+                </button>
               </div>
             </div>
 
@@ -462,9 +599,91 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         )}
 
         {/* ======================================================== */}
-        {/* MULTI-STEP REGISTRATION FORM (5 STEPS) */}
+        {/* CUSTOMER REGISTRATION FORM */}
         {/* ======================================================== */}
-        {mode === 'register' && (
+        {mode === 'register' && selectedRole === 'customer' && (
+          <form onSubmit={handleCustomerRegister} className="space-y-3.5 text-xs">
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 space-y-1">
+              <span className="font-bold block">Create Your Free Customer Account</span>
+              <p className="text-[11px] text-blue-800 leading-relaxed">
+                Save digital receipts forever, scan UPI payment QRs, and claim invoices across any ClearBill AI retailer.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-slate-600 font-medium block mb-1">Full Name</label>
+              <div className="relative">
+                <UserIcon className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Amit Kumar"
+                  value={customerName}
+                  onChange={e => setCustomerName(e.target.value)}
+                  className="w-full bg-white border border-[#E2E8F0] rounded-lg pl-9 pr-3 py-2 text-slate-900 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-slate-600 font-medium block mb-1">Email Address</label>
+              <div className="relative">
+                <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="email"
+                  required
+                  placeholder="e.g. amit@example.com"
+                  value={customerEmail}
+                  onChange={e => setCustomerEmail(e.target.value)}
+                  className="w-full bg-white border border-[#E2E8F0] rounded-lg pl-9 pr-3 py-2 text-slate-900 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-slate-600 font-medium block mb-1">Mobile Phone (Optional)</label>
+              <div className="relative">
+                <Phone className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="tel"
+                  placeholder="+91 98765 43210"
+                  value={customerPhone}
+                  onChange={e => setCustomerPhone(e.target.value)}
+                  className="w-full bg-white border border-[#E2E8F0] rounded-lg pl-9 pr-3 py-2 text-slate-900 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-slate-600 font-medium block mb-1">Password</label>
+              <div className="relative">
+                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="Minimum 6 characters"
+                  value={customerPassword}
+                  onChange={e => setCustomerPassword(e.target.value)}
+                  className="w-full bg-white border border-[#E2E8F0] rounded-lg pl-9 pr-3 py-2 text-slate-900 focus:outline-none focus:border-[#16A34A]"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-2.5 bg-[#16A34A] hover:bg-[#15803D] disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-xs cursor-pointer"
+            >
+              {loading ? 'Creating Customer Account...' : 'Create Customer Account & Access Vault'}
+            </button>
+          </form>
+        )}
+
+        {/* ======================================================== */}
+        {/* MULTI-STEP BUSINESS REGISTRATION FORM (5 STEPS) */}
+        {/* ======================================================== */}
+        {mode === 'register' && selectedRole !== 'customer' && (
           <div className="space-y-4">
             {/* Step Progress Indicators */}
             <div className="grid grid-cols-5 gap-1.5 pb-2 text-[10px] font-semibold text-center">

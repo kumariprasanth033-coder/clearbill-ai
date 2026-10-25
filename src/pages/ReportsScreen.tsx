@@ -17,6 +17,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Outlet } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 export const ReportsScreen: React.FC = () => {
   const [reportData, setReportData] = useState<{
@@ -52,7 +53,9 @@ export const ReportsScreen: React.FC = () => {
     if (selectedOutlet !== 'all') params.append('outletId', selectedOutlet);
     if (startDate) params.append('startDate', startDate);
 
-    fetch(`/api/reports/sales?${params.toString()}`)
+    fetch(`/api/reports/sales?${params.toString()}`, {
+      headers: getAuthHeaders('manager'),
+    })
       .then(r => r.json())
       .then(setReportData)
       .catch(console.error)

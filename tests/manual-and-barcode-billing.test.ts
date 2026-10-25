@@ -40,7 +40,9 @@ async function runManualAndBarcodeBillingTests() {
     // WORKFLOW A: Registered Barcode Product Lookup
     // ----------------------------------------------------
     console.log('--- Workflow A: Registered Barcode Product Lookup ---');
-    const barcodeRes = await fetch(`${BASE_URL}/api/products/lookup/8901030383786`);
+    const barcodeRes = await fetch(`${BASE_URL}/api/products/lookup/8901030383786`, {
+      headers: { 'Authorization': 'Bearer cb_sess_usr-ret-01' }
+    });
     assert(barcodeRes.ok, 'Test A.1: Barcode lookup for registered product succeeds (HTTP 200)');
     const barcodeData = await barcodeRes.json();
     assert(
@@ -160,7 +162,10 @@ async function runManualAndBarcodeBillingTests() {
     console.log('\n--- Workflows J & K: Checkout & Digital Receipt Generation ---');
     const checkoutRes = await fetch(`${BASE_URL}/api/billing/checkout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer cb_sess_usr-ret-01',
+      },
       body: JSON.stringify({
         companyId: 'cmp-demo-01',
         outletId: 'out-demo-01',
@@ -216,7 +221,10 @@ async function runManualAndBarcodeBillingTests() {
     // L.1: Empty Product Name
     const emptyNameRes = await fetch(`${BASE_URL}/api/billing/checkout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer cb_sess_usr-ret-01',
+      },
       body: JSON.stringify({
         companyId: 'cmp-demo-01',
         outletId: 'out-demo-01',
@@ -228,7 +236,10 @@ async function runManualAndBarcodeBillingTests() {
     // L.2: Zero or Negative Quantity
     const negativeQtyRes = await fetch(`${BASE_URL}/api/billing/checkout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer cb_sess_usr-ret-01',
+      },
       body: JSON.stringify({
         companyId: 'cmp-demo-01',
         outletId: 'out-demo-01',
@@ -240,7 +251,10 @@ async function runManualAndBarcodeBillingTests() {
     // L.3: Negative Unit Price
     const negativePriceRes = await fetch(`${BASE_URL}/api/billing/checkout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer cb_sess_usr-ret-01',
+      },
       body: JSON.stringify({
         companyId: 'cmp-demo-01',
         outletId: 'out-demo-01',
@@ -252,7 +266,10 @@ async function runManualAndBarcodeBillingTests() {
     // L.4: Discount Exceeding Subtotal
     const excessDiscountRes = await fetch(`${BASE_URL}/api/billing/checkout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer cb_sess_usr-ret-01',
+      },
       body: JSON.stringify({
         companyId: 'cmp-demo-01',
         outletId: 'out-demo-01',
@@ -264,7 +281,10 @@ async function runManualAndBarcodeBillingTests() {
     // L.5: Empty Items Array
     const emptyBillRes = await fetch(`${BASE_URL}/api/billing/checkout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer cb_sess_usr-ret-01',
+      },
       body: JSON.stringify({
         companyId: 'cmp-demo-01',
         outletId: 'out-demo-01',

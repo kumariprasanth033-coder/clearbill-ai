@@ -16,6 +16,7 @@ import {
   Clock,
 } from 'lucide-react';
 import { DashboardMetrics } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 interface RetailerDashboardProps {
   onNavigate: (tab: string) => void;
@@ -25,7 +26,7 @@ export const RetailerDashboard: React.FC<RetailerDashboardProps> = ({ onNavigate
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
 
   useEffect(() => {
-    fetch('/api/dashboard/metrics')
+    fetch('/api/dashboard/metrics', { headers: getAuthHeaders('retailer') })
       .then(r => r.json())
       .then(setMetrics)
       .catch(console.error);

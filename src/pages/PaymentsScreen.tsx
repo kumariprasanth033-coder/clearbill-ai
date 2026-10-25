@@ -20,6 +20,7 @@ import {
   History,
 } from 'lucide-react';
 import { DashboardMetrics } from '../types.ts';
+import { getAuthHeaders } from '../utils/authHeaders.ts';
 
 export const PaymentsScreen: React.FC = () => {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
@@ -44,7 +45,7 @@ export const PaymentsScreen: React.FC = () => {
   const [testing, setTesting] = useState(false);
 
   useEffect(() => {
-    fetch('/api/dashboard/metrics')
+    fetch('/api/dashboard/metrics', { headers: getAuthHeaders('manager') })
       .then(r => r.json())
       .then(setMetrics)
       .finally(() => setLoading(false));
@@ -55,7 +56,9 @@ export const PaymentsScreen: React.FC = () => {
 
   const loadSettlementConfig = async () => {
     try {
-      const res = await fetch('/api/payments/settlement-config');
+      const res = await fetch('/api/payments/settlement-config', {
+        headers: getAuthHeaders('manager'),
+      });
       if (res.ok) {
         const data = await res.json();
         setSettlementConfig(data);
@@ -72,7 +75,9 @@ export const PaymentsScreen: React.FC = () => {
 
   const loadAuditLogs = async () => {
     try {
-      const res = await fetch('/api/payments/audit-logs');
+      const res = await fetch('/api/payments/audit-logs', {
+        headers: getAuthHeaders('manager'),
+      });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) setAuditLogs(data);
@@ -91,7 +96,10 @@ export const PaymentsScreen: React.FC = () => {
     try {
       const res = await fetch('/api/payments/settlement-config', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getAuthHeaders('manager') as Record<string, string>),
+        },
         body: JSON.stringify({
           bankName,
           accountHolderName: accountHolder,
