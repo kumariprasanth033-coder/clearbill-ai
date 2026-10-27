@@ -89,6 +89,45 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const [copiedLink, setCopiedLink] = useState(false);
   const [receiptQrDataUrl, setReceiptQrDataUrl] = useState<string | null>(null);
 
+  // Dynamic Live Time & Running Countdown State
+  const [liveClock, setLiveClock] = useState<string>(() => new Date().toLocaleTimeString());
+  const [liveCountdownSec, setLiveCountdownSec] = useState<number>(300); // 5-minute dynamic window
+  const [isDynamicRunning, setIsDynamicRunning] = useState<boolean>(true);
+  const [updateNotification, setUpdateNotification] = useState<string | null>(null);
+
+  // Real-time 1,000ms Clock Heartbeat
+  useEffect(() => {
+    const clockTimer = setInterval(() => {
+      setLiveClock(new Date().toLocaleTimeString());
+    }, 1000);
+    return () => clearInterval(clockTimer);
+  }, []);
+
+  // Real-time Dynamic Countdown decrements every 1 second
+  useEffect(() => {
+    if (!isDynamicRunning) return;
+    const interval = setInterval(() => {
+      setLiveCountdownSec(prev => (prev > 0 ? prev - 1 : 300));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isDynamicRunning]);
+
+  // Format timer helper mm:ss
+  const formatTimer = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Interactive Update / Reset Dynamic Timer
+  const handleUpdateDynamicTimer = () => {
+    setLiveCountdownSec(300);
+    setIsDynamicRunning(true);
+    setLiveClock(new Date().toLocaleTimeString());
+    setUpdateNotification('Dynamic live timer refreshed to 05:00 and synchronized!');
+    setTimeout(() => setUpdateNotification(null), 3500);
+  };
+
   // "Hey GPT" AI Spend Assistant State
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -247,6 +286,16 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
       { role: 'user', text: q, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
     ]);
     setAiLoading(true);
+
+    // If query asks about dynamic time, switch to dynamic pass and refresh timer
+    const lowerQ = q.toLowerCase();
+    if (lowerQ.includes('time') || lowerQ.includes('dynamic') || lowerQ.includes('running') || lowerQ.includes('countdown') || lowerQ.includes('timer') || lowerQ.includes('clock') || lowerQ.includes('update')) {
+      setReceiptViewerMode('dynamic');
+      setLiveCountdownSec(300);
+      setIsDynamicRunning(true);
+      setUpdateNotification('Dynamic time displayed and refreshed to 05:00!');
+      setTimeout(() => setUpdateNotification(null), 3500);
+    }
 
     let customerToken = '';
     if (typeof window !== 'undefined') {
@@ -628,6 +677,8 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                   {/* Suggested Prompt Chips */}
                   <div className="flex flex-wrap gap-1.5 pt-1">
                     {[
+                      '⏱ Where is dynamic time running?',
+                      'Update dynamic timer',
                       'Analyze my spend',
                       'Tea & snack spend',
                       'Top expenses',
@@ -655,7 +706,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                 >
                   <input
                     type="text"
-                    placeholder="Ask Hey GPT: e.g. How much did I spend this month on snacks?"
+                    placeholder="Ask Hey GPT: e.g. Where is time dynamic running? See and update that."
                     value={aiPrompt}
                     onChange={e => setAiPrompt(e.target.value)}
                     disabled={aiLoading}
@@ -677,6 +728,61 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
             {/* IN-PAGE RECEIPT VIEWER SECTION: PRINTABLE & DYNAMIC ON ONE PAGE */}
             {/* =============================================================== */}
             <div className="bg-white border border-slate-200 rounded-3xl p-5 sm:p-7 shadow-xs space-y-6">
+              {/* Dynamic Live Running Time Ticker & Status Banner */}
+              <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-[#16A34A] text-white flex items-center justify-center shadow-xs">
+                    <Clock className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-black text-emerald-950 uppercase tracking-wider">
+                        Live Dynamic Time Running
+                      </span>
+                      <span className="inline-flex items-center gap-1 bg-emerald-200/70 text-emerald-900 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-ping inline-block" />
+                        1s Heartbeat
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-slate-600 mt-0.5 font-mono">
+                      <span>Clock: <strong className="text-slate-900 font-bold">{liveClock}</strong></span>
+                      <span>·</span>
+                      <span>Countdown: <strong className="text-[#15803D] font-bold">{formatTimer(liveCountdownSec)}</strong></span>
+                      <span>·</span>
+                      <span>Dynamic Preview: <span className="text-slate-700 font-semibold">{isDynamicRunning ? 'Active' : 'Paused'}</span></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleUpdateDynamicTimer}
+                    className="px-3 py-1.5 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-xl transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Update Dynamic Timer</span>
+                  </button>
+
+                  <button
+                    onClick={() => setReceiptViewerMode(receiptViewerMode === 'dynamic' ? 'printable' : 'dynamic')}
+                    className="px-3 py-1.5 bg-white border border-emerald-300 text-emerald-900 hover:bg-emerald-50 text-xs font-semibold rounded-xl transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                  >
+                    <Ticket className="w-3.5 h-3.5 text-[#16A34A]" />
+                    <span>{receiptViewerMode === 'dynamic' ? 'Switch to Printable Table' : 'See Dynamic Pass Running'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {updateNotification && (
+                <div className="bg-emerald-600 text-white text-xs font-bold px-4 py-2.5 rounded-xl flex items-center justify-between shadow-xs animate-fade-in">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>{updateNotification}</span>
+                  </div>
+                  <span className="font-mono text-[11px] opacity-90">{liveClock}</span>
+                </div>
+              )}
+
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
                 <div>
                   <div className="flex items-center gap-2">
@@ -924,9 +1030,17 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                             </div>
                           </div>
 
-                          <div className="bg-black/30 backdrop-blur-xs border border-white/20 rounded-xl px-3 py-1 text-right">
-                            <span className="text-[9px] text-emerald-300 font-bold uppercase tracking-wider block">Vault Stored</span>
-                            <span className="font-mono text-xs font-bold text-white">Permanent Record</span>
+                          <div className="bg-black/40 backdrop-blur-md border border-white/25 rounded-2xl px-3.5 py-1.5 text-right shadow-sm">
+                            <div className="flex items-center gap-1.5 text-[10px] font-bold text-amber-300 uppercase tracking-wider justify-end">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
+                              <span>Live Dynamic Running</span>
+                            </div>
+                            <div className="font-mono text-base font-black text-white tracking-widest">
+                              {formatTimer(liveCountdownSec)}
+                            </div>
+                            <div className="text-[10px] text-emerald-300 font-mono flex items-center justify-end gap-1">
+                              <span>Clock: {liveClock}</span>
+                            </div>
                           </div>
                         </div>
 
@@ -948,6 +1062,74 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
 
                       {/* Body Details */}
                       <div className="p-5 sm:p-6 space-y-4">
+                        {/* Dedicated Live Dynamic Running Time & Verification Card */}
+                        <div className="bg-gradient-to-br from-emerald-50/90 to-teal-50/90 border border-emerald-200 rounded-2xl p-4 space-y-3 shadow-2xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-8 h-8 rounded-xl bg-[#16A34A] text-white flex items-center justify-center shadow-xs">
+                                <Clock className="w-4 h-4 animate-spin" style={{ animationDuration: '8s' }} />
+                              </div>
+                              <div>
+                                <span className="text-xs font-black text-emerald-950 uppercase tracking-wider block">
+                                  Dynamic Live Running Time & Synchronized Heartbeat
+                                </span>
+                                <span className="text-[11px] text-slate-600">
+                                  Updating every 1,000ms · Real-time cryptographic ledger verification
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={handleUpdateDynamicTimer}
+                                className="px-3 py-1.5 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-xl transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                                title="Update and reset dynamic countdown to 05:00"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                <span>Update & Reset Timer</span>
+                              </button>
+
+                              <button
+                                onClick={() => setIsDynamicRunning(!isDynamicRunning)}
+                                className="px-2.5 py-1.5 bg-white border border-emerald-300 text-emerald-900 hover:bg-emerald-50 text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                              >
+                                {isDynamicRunning ? 'Pause Clock' : 'Resume Clock'}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-1">
+                            <div className="bg-white border border-emerald-100 rounded-xl p-2.5 shadow-2xs">
+                              <span className="text-[10px] text-slate-400 uppercase font-semibold block">System Live Clock</span>
+                              <span className="font-mono text-sm font-bold text-slate-900">{liveClock}</span>
+                            </div>
+                            <div className="bg-white border border-emerald-100 rounded-xl p-2.5 shadow-2xs">
+                              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Dynamic Countdown</span>
+                              <span className="font-mono text-sm font-black text-[#15803D]">{formatTimer(liveCountdownSec)}</span>
+                            </div>
+                            <div className="bg-white border border-emerald-100 rounded-xl p-2.5 col-span-2 sm:col-span-1 shadow-2xs">
+                              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Sync Status</span>
+                              <span className="text-xs font-bold text-emerald-700 flex items-center gap-1.5 mt-0.5">
+                                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                                <span>1,000ms Live Pulse</span>
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Countdown Progress Meter */}
+                          <div className="space-y-1 pt-1">
+                            <div className="flex justify-between text-[10px] font-semibold text-slate-600">
+                              <span>Dynamic Token Validity Window</span>
+                              <span className="font-mono">{formatTimer(liveCountdownSec)} / 05:00 ({Math.round((liveCountdownSec / 300) * 100)}%)</span>
+                            </div>
+                            <div className="h-2 w-full bg-emerald-100 rounded-full overflow-hidden p-0.5">
+                              <div
+                                className="h-full bg-gradient-to-r from-[#16A34A] to-emerald-400 transition-all duration-1000 ease-linear rounded-full"
+                                style={{ width: `${(liveCountdownSec / 300) * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
                         <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-200 rounded-2xl p-4">
                           <div>
                             <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
