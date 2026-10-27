@@ -256,6 +256,13 @@ export default function App() {
     navigateTo(`/receipt/${receiptToken}`);
   };
 
+  // Memoized Back to Billing Handler for Cashier Station
+  const handleBackToBilling = useCallback(() => {
+    setIsCashierReceiptView(false);
+    setCurrentTab('new-bill');
+    navigateTo('/retailer/pos');
+  }, [navigateTo]);
+
   // Role-Isolated Logout Handlers
   const handleCustomerLogout = () => {
     if (typeof window !== 'undefined') {
@@ -534,14 +541,7 @@ export default function App() {
           <DigitalReceiptScreen
             receiptToken={activeReceiptToken}
             isCashierView={isCashierReceiptView}
-            onBackToBilling={
-              isCashierReceiptView
-                ? () => {
-                    setCurrentTab('new-bill');
-                    navigateTo('/retailer/pos');
-                  }
-                : undefined
-            }
+            onBackToBilling={isCashierReceiptView ? handleBackToBilling : undefined}
             onGoToCustomerHome={() => {
               if (currentUser?.role === 'customer') {
                 navigateTo('/customer/dashboard');
@@ -653,6 +653,12 @@ export default function App() {
             setAuthModalOpen(true);
           }}
           onOpenRegister={() => {
+            setAuthModalRole('manager');
+            setIsRegisterMode(true);
+            setAuthModalOpen(true);
+          }}
+          onOpenCustomerRegister={() => {
+            setAuthModalRole('customer');
             setIsRegisterMode(true);
             setAuthModalOpen(true);
           }}
@@ -827,7 +833,7 @@ export default function App() {
         <DigitalReceiptScreen
           receiptToken={activeReceiptToken}
           isCashierView={true}
-          onBackToBilling={() => setCurrentTab('new-bill')}
+          onBackToBilling={handleBackToBilling}
           onClaimSuccess={() => {}}
         />
       )}

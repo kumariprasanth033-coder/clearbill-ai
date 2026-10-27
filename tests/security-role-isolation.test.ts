@@ -89,8 +89,8 @@ async function runSecurityRoleIsolationTests() {
       'TEST 3.2: isExpired flag is true'
     );
     assert(
-      expiredData.error?.includes('This receipt link has expired') &&
-      expiredData.error?.includes('Please log in to your customer account'),
+      (expiredData.error?.includes('This dynamic guest receipt preview has expired') || expiredData.error?.includes('This receipt link has expired')) &&
+      (expiredData.error?.includes('log in') || expiredData.error?.includes('Please log in')),
       'TEST 3.3: Customer-friendly expiration message returned without retailer leakage'
     );
 

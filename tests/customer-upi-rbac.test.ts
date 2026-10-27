@@ -372,7 +372,7 @@ async function runCustomerUpiRbacTestSuite() {
     );
     const expiredData = await expiredRes.json();
     assert(
-      expiredData.isExpired === true && expiredData.error?.includes('This receipt link has expired'),
+      expiredData.isExpired === true && (expiredData.error?.includes('expired') || expiredData.error?.includes('This receipt link has expired')),
       'TEST I.2: Customer-friendly expiration notice returned without POS leakage'
     );
 

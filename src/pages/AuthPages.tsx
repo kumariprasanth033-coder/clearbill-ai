@@ -4,7 +4,7 @@
  * Password Visibility Toggles, Real-Time Input Validation, and Financial Security Disclosures.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ShoppingBag,
   Store,
@@ -45,6 +45,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 }) => {
   const [mode, setMode] = useState<'login' | 'register'>(isRegistering ? 'register' : 'login');
   const [selectedRole, setSelectedRole] = useState<'manager' | 'retailer' | 'customer' | 'admin'>(initialRole);
+
+  useEffect(() => {
+    setMode(isRegistering ? 'register' : 'login');
+    setSelectedRole(initialRole);
+    if (initialRole === 'manager') setLoginEmail('manager@clearbill.ai');
+    else if (initialRole === 'customer') setLoginEmail('customer@clearbill.ai');
+    else if (initialRole === 'admin') setLoginEmail('admin@clearbill.ai');
+    else setLoginEmail('cashier@clearbill.ai');
+  }, [initialRole, isRegistering]);
 
   // Login form state
   const [loginEmail, setLoginEmail] = useState(
@@ -397,24 +406,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <ShoppingBag className="w-5 h-5" />
           </div>
           <h2 className="text-xl font-extrabold text-[#172B4D] tracking-tight">
-            {mode === 'login' ? 'Sign In to ClearBill AI' : 'Register New Business'}
+            {mode === 'login'
+              ? 'Sign In to ClearBill AI'
+              : selectedRole === 'customer'
+              ? 'Create Customer Account'
+              : 'Register New Business (5 Steps)'}
           </h2>
           <p className="text-xs text-[#64748B] mt-0.5">
             {mode === 'login'
               ? 'Select your assigned role and log in with your credentials'
-              : 'Multi-step company registration, tax configuration, and POS initialization'}
+              : selectedRole === 'customer'
+              ? 'Sign up to store digital receipts, scan UPI QRs, and claim warranties'
+              : 'Step ' + step + ' of 5: Multi-step company profile, tax configuration, and POS initialization'}
           </p>
         </div>
 
-        {/* Tab Switcher: Login vs Register */}
-        <div className="flex p-1 bg-slate-100 rounded-xl mb-5 text-xs font-semibold">
+        {/* Tab Switcher: Existing User vs 5-Step Business vs Customer */}
+        <div className="flex p-1 bg-slate-100 rounded-xl mb-5 text-xs font-semibold gap-1">
           <button
             type="button"
             onClick={() => {
               setMode('login');
               setError(null);
             }}
-            className={`flex-1 py-2 rounded-lg transition-all cursor-pointer ${
+            className={`flex-1 py-2 px-2 text-center rounded-lg transition-all cursor-pointer ${
               mode === 'login' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
             }`}
           >
@@ -424,13 +439,31 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             type="button"
             onClick={() => {
               setMode('register');
+              setSelectedRole('manager');
               setError(null);
             }}
-            className={`flex-1 py-2 rounded-lg transition-all cursor-pointer ${
-              mode === 'register' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+            className={`flex-1 py-2 px-2 text-center rounded-lg transition-all cursor-pointer ${
+              mode === 'register' && selectedRole !== 'customer'
+                ? 'bg-[#172033] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
             }`}
           >
             Register Business (5 Steps)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMode('register');
+              setSelectedRole('customer');
+              setError(null);
+            }}
+            className={`flex-1 py-2 px-2 text-center rounded-lg transition-all cursor-pointer ${
+              mode === 'register' && selectedRole === 'customer'
+                ? 'bg-[#16A34A] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            Customer Sign Up
           </button>
         </div>
 

@@ -29,6 +29,7 @@ import { ThreeScannerShowcase } from '../components/ThreeScannerShowcase.tsx';
 interface LandingPageProps {
   onSelectRoleLogin: (role: 'manager' | 'retailer' | 'customer') => void;
   onOpenRegister: () => void;
+  onOpenCustomerRegister?: () => void;
   onTryScanner: () => void;
   onTryQuickBill?: () => void;
 }
@@ -36,6 +37,7 @@ interface LandingPageProps {
 export const LandingPage: React.FC<LandingPageProps> = ({
   onSelectRoleLogin,
   onOpenRegister,
+  onOpenCustomerRegister,
   onTryScanner,
   onTryQuickBill,
 }) => {
@@ -51,19 +53,19 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     <div className="min-h-screen bg-[#F7F9FC] text-[#172B4D] flex flex-col justify-between">
       {/* Top Navigation Bar */}
       <header className="bg-white border-b border-[#E2E8F0] sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between gap-8">
+        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between gap-6">
           {/* Zone 1: Brand */}
           <div className="flex items-center gap-2.5 shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-[#16A34A] flex items-center justify-center text-white shadow-xs">
-              <ShoppingBag className="w-4 h-4" />
+            <div className="w-8 h-8 rounded-lg bg-[#16A34A] flex items-center justify-center text-white shadow-xs font-black">
+              C
             </div>
             <span className="font-extrabold text-base tracking-tight text-[#172B4D] whitespace-nowrap">
               ClearBill AI
             </span>
           </div>
 
-          {/* Zone 2: Navigation Links (Smooth Anchor Scrolling) */}
-          <nav className="hidden md:flex items-center gap-6 text-xs font-semibold text-slate-600">
+          {/* Zone 2: Navigation Links */}
+          <nav className="hidden lg:flex items-center gap-6 text-xs font-semibold text-slate-600">
             <a
               href="#features"
               onClick={e => handleNavClick(e, 'features')}
@@ -92,38 +94,37 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             >
               Digital Receipts
             </a>
-            <a
-              href="#sustainability"
-              onClick={e => handleNavClick(e, 'sustainability')}
-              className="hover:text-slate-900 transition-colors whitespace-nowrap"
-            >
-              Paperless ESG
-            </a>
           </nav>
 
-          {/* Zone 3: Action Buttons */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          {/* Zone 3: Distinct Business & Customer Access Points */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => onSelectRoleLogin('customer')}
+              className="px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+            >
+              Customer Portal
+            </button>
             <button
               onClick={() => onSelectRoleLogin('retailer')}
-              className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+              className="px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
             >
-              Sign In
+              Cashier Sign In
             </button>
             <button
               onClick={onOpenRegister}
-              className="px-4 py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-lg transition-colors shadow-xs whitespace-nowrap cursor-pointer"
+              className="px-3.5 py-1.5 bg-[#172033] hover:bg-[#263449] text-white text-xs font-bold rounded-lg transition-colors shadow-xs whitespace-nowrap cursor-pointer"
             >
-              Register Business
+              Register Business (5 Steps)
             </button>
           </div>
         </div>
       </header>
 
       {/* Hero Section */}
-      <section className="py-12 md:py-20 px-6 max-w-7xl mx-auto w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+      <section className="py-10 md:py-16 px-6 max-w-7xl mx-auto w-full">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
           {/* Left Hero Column */}
-          <div className="lg:col-span-7 space-y-6">
+          <div className="lg:col-span-7 space-y-5">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-[#DCFCE7] text-[#15803D] text-xs font-semibold">
               <Sparkles className="w-3.5 h-3.5" />
               <span>Next-Gen Retail POS & Smart Digital Invoices</span>
@@ -136,40 +137,99 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             </h1>
 
             <p className="text-sm md:text-base text-[#64748B] max-w-xl leading-relaxed">
-              Designed for tea shops, bakeries, grocery stores, and modern retail chains.
-              Eliminate paper waste with instant 30-second customer QR receipts, camera barcode scanning,
-              and authoritative decimal-safe financial ledgers backed by MySQL.
+              Designed for retail chains, supermarkets, bakeries, and tea shops. Eliminate thermal paper waste with instant 5-minute dynamic preview QR receipts, real camera barcode scanning, and verified real-time UPI payments.
             </p>
 
-            {/* Role Quick Access Portals */}
-            <div className="pt-2 flex flex-wrap gap-3">
-              <button
-                onClick={() => onSelectRoleLogin('manager')}
-                className="px-4 py-2.5 bg-[#172033] hover:bg-[#263449] text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-2 cursor-pointer"
-              >
-                <span>Manager Portal</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+            {/* SEPARATE BUSINESS & CUSTOMER PORTAL CARDS (Module 2) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+              {/* Card 1: Business Portal */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm hover:border-slate-300 transition-all space-y-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-[#172033] text-white flex items-center justify-center font-bold text-xs">
+                    <Store className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-sm text-[#172B4D]">Business Portal</h3>
+                    <p className="text-[11px] text-slate-500">For Merchants, Cashiers & Managers</p>
+                  </div>
+                </div>
 
-              <button
-                onClick={() => onSelectRoleLogin('retailer')}
-                className="px-4 py-2.5 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-2 cursor-pointer"
-              >
-                <span>Cashier POS</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Register in 5 steps, manage catalogue, scan barcodes, and complete rapid billing with instant digital receipts.
+                </p>
 
-              <button
-                onClick={() => onSelectRoleLogin('customer')}
-                className="px-4 py-2.5 bg-white border border-[#E2E8F0] hover:bg-slate-50 text-slate-700 text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-2 cursor-pointer"
-              >
-                <span>Customer / My Receipts</span>
-                <QrCode className="w-3.5 h-3.5 text-[#16A34A]" />
-              </button>
+                <div className="space-y-1.5 pt-1">
+                  <button
+                    onClick={onOpenRegister}
+                    className="w-full py-2 bg-[#172033] hover:bg-[#263449] text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <span>Register Business (5 Steps)</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={() => onSelectRoleLogin('retailer')}
+                      className="py-1.5 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-semibold rounded-lg text-center cursor-pointer"
+                    >
+                      Cashier POS
+                    </button>
+                    <button
+                      onClick={() => onSelectRoleLogin('manager')}
+                      className="py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-lg text-center cursor-pointer"
+                    >
+                      Manager Login
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Card 2: Customer Portal */}
+              <div className="bg-white border border-emerald-200 rounded-2xl p-4 shadow-sm hover:border-emerald-300 transition-all space-y-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-[#16A34A] text-white flex items-center justify-center font-bold text-xs">
+                    <QrCode className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-sm text-[#172B4D]">Customer Portal</h3>
+                    <p className="text-[11px] text-emerald-700 font-medium">For Shoppers & Consumers</p>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Scan receipt QRs, pay merchants via verified UPI QR, and save digital receipts permanently in your private vault.
+                </p>
+
+                <div className="space-y-1.5 pt-1">
+                  <button
+                    onClick={() => onSelectRoleLogin('customer')}
+                    className="w-full py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Scan Receipt / UPI to Pay</span>
+                  </button>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={() => onSelectRoleLogin('customer')}
+                      className="py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold rounded-lg text-center cursor-pointer"
+                    >
+                      Customer Sign In
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (onOpenCustomerRegister) onOpenCustomerRegister();
+                        else onSelectRoleLogin('customer');
+                      }}
+                      className="py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-lg text-center cursor-pointer"
+                    >
+                      Create Free Account
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Proof Points */}
-            <div className="pt-4 flex items-center gap-6 text-xs text-slate-500">
+            <div className="pt-2 flex flex-wrap items-center gap-5 text-xs text-slate-500">
               <div className="flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-[#16A34A]" />
                 <span>Zero Thermal Paper</span>
@@ -180,7 +240,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </div>
               <div className="flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-[#16A34A]" />
-                <span>MySQL & XAMPP Community</span>
+                <span>Verified Real-Time UPI</span>
               </div>
             </div>
           </div>

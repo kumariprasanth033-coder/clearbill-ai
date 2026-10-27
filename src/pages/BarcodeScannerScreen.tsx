@@ -68,10 +68,23 @@ interface ExternalProductMeta {
   manufacturer?: string;
 }
 
+// Universal format detection helper
+export const inferBarcodeFormat = (barcode: string): string => {
+  const clean = barcode.trim();
+  if (/^\d{13}$/.test(clean)) return 'EAN-13';
+  if (/^\d{12}$/.test(clean)) return 'UPC-A';
+  if (/^\d{8}$/.test(clean)) return 'EAN-8';
+  if (/^\d{6}$/.test(clean)) return 'UPC-E';
+  if (/^[A-Za-z0-9\-_./\s]+$/.test(clean)) return 'Code 128';
+  return 'Retail Barcode';
+};
+
 interface AtomicScanState {
   scannedBarcode: string | null;
+  barcodeFormat: string;
   matchedProduct: Product | null;
   externalIdentified: ExternalProductMeta | null;
+  isUnregistered: boolean;
   lookupLoading: boolean;
   lookupError: string | null;
 }
@@ -90,8 +103,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
   // Consolidated atomic scan state
   const [scanState, setScanState] = useState<AtomicScanState>({
     scannedBarcode: null,
+    barcodeFormat: 'EAN-13',
     matchedProduct: null,
     externalIdentified: null,
+    isUnregistered: false,
     lookupLoading: false,
     lookupError: null,
   });
@@ -121,6 +136,25 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
   const [confirmTaxRate, setConfirmTaxRate] = useState('5');
   const [confirmRegisterLoading, setConfirmRegisterLoading] = useState(false);
   const [confirmRegisterError, setConfirmRegisterError] = useState<string | null>(null);
+
+  // AI-Assisted Product Identification Modal
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [aiBarcode, setAiBarcode] = useState('');
+  const [aiImagePreview, setAiImagePreview] = useState<string | null>(null);
+  const [aiTextHint, setAiTextHint] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiIdentifiedResult, setAiIdentifiedResult] = useState<{
+    product_name: string;
+    brand: string;
+    category: string;
+    unit: string;
+    package_size: string;
+    estimated_mrp: number | null;
+  } | null>(null);
+  const [aiSellingPrice, setAiSellingPrice] = useState('');
+  const [aiTaxRate, setAiTaxRate] = useState('5');
+  const [aiRegisterLoading, setAiRegisterLoading] = useState(false);
 
   // Manual Product Registration Modal for Unidentified Barcodes
   const [manualModalOpen, setManualModalOpen] = useState(false);
@@ -185,12 +219,16 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
 
       playBeep();
 
-      // Set initial loading state
+      const format = inferBarcodeFormat(cleanBarcode);
+
+      // Set initial loading state with immediately visible decoded barcode and format
       setScanState(prev => ({
         ...prev,
         scannedBarcode: cleanBarcode,
+        barcodeFormat: format,
         matchedProduct: null,
         externalIdentified: null,
+        isUnregistered: false,
         lookupLoading: true,
         lookupError: null,
       }));
@@ -205,8 +243,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
 
         setScanState({
           scannedBarcode: cleanBarcode,
+          barcodeFormat: format,
           matchedProduct: cached,
           externalIdentified: null,
+          isUnregistered: false,
           lookupLoading: false,
           lookupError: null,
         });
@@ -246,8 +286,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
 
           setScanState({
             scannedBarcode: cleanBarcode,
+            barcodeFormat: format,
             matchedProduct: data.product,
             externalIdentified: null,
+            isUnregistered: false,
             lookupLoading: false,
             lookupError: null,
           });
@@ -265,8 +307,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
         else if (data.externalFound && data.externalProduct) {
           setScanState({
             scannedBarcode: cleanBarcode,
+            barcodeFormat: format,
             matchedProduct: null,
             externalIdentified: data.externalProduct,
+            isUnregistered: false,
             lookupLoading: false,
             lookupError: null,
           });
@@ -277,14 +321,16 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
           setConfirmRegisterError(null);
           setConfirmPriceModalOpen(true);
         }
-        // CASE 3: Not found in MySQL and not found in External Database
+        // CASE 3: Not found in MySQL and not found in External Database -> ACTIVE RECOVERY (NO DEAD-END)
         else {
           setScanState({
             scannedBarcode: cleanBarcode,
+            barcodeFormat: format,
             matchedProduct: null,
             externalIdentified: null,
+            isUnregistered: true,
             lookupLoading: false,
-            lookupError: data.message || 'Product information not found in store catalogue or external database.',
+            lookupError: null,
           });
 
           setScanHistory(prev => [
@@ -302,8 +348,9 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
       } catch (err: any) {
         setScanState(prev => ({
           ...prev,
+          isUnregistered: true,
           lookupLoading: false,
-          lookupError: 'Lookup error: ' + err.message,
+          lookupError: 'Lookup notice: ' + err.message,
         }));
       } finally {
         isProcessingRef.current = false;
@@ -311,6 +358,206 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
     },
     [onAddToCart]
   );
+
+  // Capture instant snapshot from active video camera for AI recognition
+  const captureCameraSnapshot = (): string | null => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2) return null;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', 0.85);
+    } catch {
+      return null;
+    }
+  };
+
+  // Launch AI Identification modal
+  const handleOpenAiModal = (targetBarcode?: string) => {
+    const b = targetBarcode || scanState.scannedBarcode || '';
+    setAiBarcode(b);
+    setAiError(null);
+    setAiIdentifiedResult(null);
+    setAiSellingPrice('');
+    setAiTaxRate('5');
+    setAiTextHint('');
+
+    // Pre-capture frame if camera is running
+    const snapshot = captureCameraSnapshot();
+    if (snapshot) {
+      setAiImagePreview(snapshot);
+    } else {
+      setAiImagePreview(null);
+    }
+    setAiModalOpen(true);
+  };
+
+  // Run AI Vision identification via server route
+  const handleRunAiIdentification = async () => {
+    if (!aiBarcode) {
+      setAiError('Scanned barcode is required.');
+      return;
+    }
+    if (!aiImagePreview && !aiTextHint.trim()) {
+      setAiError('Please take a camera snapshot, upload a photo, or enter a text label hint.');
+      return;
+    }
+
+    setAiLoading(true);
+    setAiError(null);
+
+    try {
+      const res = await fetch('/api/products/identify-ai', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders('retailer'),
+        },
+        body: JSON.stringify({
+          barcode: aiBarcode,
+          imageBase64: aiImagePreview || undefined,
+          textHint: aiTextHint.trim() || undefined,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success && data.identifiedProduct) {
+        setAiIdentifiedResult(data.identifiedProduct);
+        if (data.identifiedProduct.estimated_mrp) {
+          setAiSellingPrice(String(data.identifiedProduct.estimated_mrp));
+        } else {
+          setAiSellingPrice('');
+        }
+      } else {
+        setAiError(data.error || 'AI could not identify this product. Please enter details manually.');
+      }
+    } catch (err: any) {
+      setAiError('AI connection error: ' + err.message);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  // Confirm selling price and register AI-identified product in store MySQL catalogue
+  const handleConfirmAiProductRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiIdentifiedResult) return;
+
+    const price = parseFloat(aiSellingPrice);
+    if (isNaN(price) || price <= 0) {
+      setAiError('Please enter a valid retailer selling price greater than ₹0.');
+      return;
+    }
+
+    setAiRegisterLoading(true);
+    setAiError(null);
+
+    try {
+      const res = await fetch('/api/products/register-scanned', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders('retailer'),
+        },
+        body: JSON.stringify({
+          barcode: aiBarcode,
+          product_name: aiIdentifiedResult.product_name,
+          category: aiIdentifiedResult.category || 'General Retail',
+          unit: aiIdentifiedResult.unit || 'pcs',
+          unit_price: price,
+          tax_rate: parseFloat(aiTaxRate) || 5,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.product) {
+        productCacheRef.current.set(aiBarcode, data.product);
+
+        setScanState({
+          scannedBarcode: aiBarcode,
+          barcodeFormat: inferBarcodeFormat(aiBarcode),
+          matchedProduct: data.product,
+          externalIdentified: null,
+          isUnregistered: false,
+          lookupLoading: false,
+          lookupError: null,
+        });
+
+        setAiModalOpen(false);
+
+        if (onAddToCart) {
+          onAddToCart(data.product);
+        }
+
+        setScanHistory(prev => [
+          { barcode: aiBarcode, product: data.product, timestamp: new Date().toLocaleTimeString() },
+          ...prev.slice(0, 9),
+        ]);
+      } else {
+        setAiError(data.error || 'Failed to save product in store catalogue.');
+      }
+    } catch (err: any) {
+      setAiError(err.message || 'Error saving product to MySQL.');
+    } finally {
+      setAiRegisterLoading(false);
+    }
+  };
+
+  // Re-try product lookup
+  const handleRetryLookup = () => {
+    if (scanState.scannedBarcode) {
+      handleBarcodeDetected(scanState.scannedBarcode, 5);
+    }
+  };
+
+  // Open manual registration with pre-filled barcode
+  const handleOpenManualModalWithBarcode = (targetBarcode?: string | null) => {
+    const b = targetBarcode || scanState.scannedBarcode || '';
+    setManualBarcode(b);
+    setManualName('');
+    setManualPrice('');
+    setManualCategory('General Retail');
+    setManualTaxRate('5');
+    setManualUnit('pcs');
+    setManualError(null);
+    setManualModalOpen(true);
+  };
+
+  // Handle external USB/Bluetooth wedge barcode scanners
+  useEffect(() => {
+    let buffer = '';
+    let lastKeyTime = Date.now();
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+        return;
+      }
+
+      const currentTime = Date.now();
+      if (currentTime - lastKeyTime > 150) {
+        buffer = '';
+      }
+      lastKeyTime = currentTime;
+
+      if (e.key === 'Enter') {
+        if (buffer.length >= 3) {
+          e.preventDefault();
+          handleBarcodeDetected(buffer, 2);
+          buffer = '';
+        }
+      } else if (e.key.length === 1) {
+        buffer += e.key;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleBarcodeDetected]);
 
   // Handle price confirmation and automatic first-time registration for externally identified product
   const handleConfirmPriceAndRegister = async (e: React.FormEvent) => {
@@ -351,8 +598,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
 
         setScanState({
           scannedBarcode: external.barcode,
+          barcodeFormat: inferBarcodeFormat(external.barcode),
           matchedProduct: data.product,
           externalIdentified: null,
+          isUnregistered: false,
           lookupLoading: false,
           lookupError: null,
         });
@@ -418,8 +667,10 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
 
         setScanState({
           scannedBarcode: manualBarcode.trim(),
+          barcodeFormat: inferBarcodeFormat(manualBarcode.trim()),
           matchedProduct: data.product,
           externalIdentified: null,
+          isUnregistered: false,
           lookupLoading: false,
           lookupError: null,
         });
@@ -829,16 +1080,23 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
             <h3 className="text-sm font-bold text-[#172B4D] mb-3 flex items-center justify-between">
               <span>Detection Result</span>
               {scannedBarcode && (
-                <span className="text-[11px] font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold">
-                  {scannedBarcode}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-semibold bg-blue-50 border border-blue-200 text-blue-800 px-2 py-0.5 rounded font-mono">
+                    {scanState.barcodeFormat || 'EAN-13'}
+                  </span>
+                  <span className="text-[11px] font-mono bg-slate-100 text-slate-800 px-2 py-0.5 rounded font-bold">
+                    {scannedBarcode}
+                  </span>
+                </div>
               )}
             </h3>
 
             {lookupLoading ? (
               <div className="py-8 text-center text-slate-500 space-y-2">
                 <RefreshCw className="w-6 h-6 animate-spin mx-auto text-[#16A34A]" />
-                <p className="text-xs">Searching store catalogue and global product registry...</p>
+                <p className="text-xs">
+                  Querying store catalogue for barcode <span className="font-mono font-bold">{scannedBarcode}</span>...
+                </p>
               </div>
             ) : matchedProduct ? (
               /* CASE 1: Registered Product Match */
@@ -932,28 +1190,56 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                   <span>Set Selling Price & Register</span>
                 </button>
               </div>
-            ) : lookupError ? (
-              /* CASE 3: Not Found Anywhere */
-              <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
-                <div className="flex items-start gap-2.5">
-                  <FileQuestion className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            ) : scanState.isUnregistered || lookupError ? (
+              /* CASE 3: Not in MySQL and Not in External DB -> Active Recovery */
+              <div className="p-4 bg-amber-50/80 border border-amber-300 rounded-xl space-y-3">
+                <div className="flex items-start justify-between gap-3">
                   <div>
-                    <h4 className="text-xs font-bold text-amber-900">Product Not Found</h4>
-                    <p className="text-xs text-amber-800 mt-1">{lookupError}</p>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-[10px] font-bold text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                        Barcode Decoded · Unregistered Item
+                      </span>
+                      <span className="text-[10px] font-mono font-bold bg-white border border-amber-300 text-amber-900 px-1.5 py-0.5 rounded">
+                        {scanState.barcodeFormat || 'Universal Barcode'}
+                      </span>
+                    </div>
+                    <h4 className="text-sm font-bold text-slate-900">
+                      Barcode: <span className="font-mono text-emerald-800 font-bold">{scannedBarcode}</span>
+                    </h4>
+                    <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                      {lookupError ||
+                        'This retail barcode is detected successfully, but not yet registered in your store catalogue or external database.'}
+                    </p>
                   </div>
+                  <Package className="w-6 h-6 text-amber-600 shrink-0 mt-1" />
                 </div>
-                <div className="pt-2">
+
+                <div className="pt-1 space-y-2">
+                  {/* Button 1: Try Product Lookup Again */}
                   <button
-                    onClick={() => {
-                      setManualBarcode(scannedBarcode || '');
-                      setManualName('');
-                      setManualPrice('');
-                      setManualError(null);
-                      setManualModalOpen(true);
-                    }}
-                    className="w-full py-2 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-lg transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                    onClick={handleRetryLookup}
+                    disabled={lookupLoading}
+                    className="w-full py-2 px-3 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-2xs"
                   >
-                    <Plus className="w-3.5 h-3.5" />
+                    <RefreshCw className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Try Product Lookup Again</span>
+                  </button>
+
+                  {/* Button 2: Identify Product Using AI */}
+                  <button
+                    onClick={() => handleOpenAiModal(scannedBarcode || undefined)}
+                    className="w-full py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs"
+                  >
+                    <Sparkles className="w-4 h-4 text-amber-300" />
+                    <span>Identify Product Using AI (Photo / Label)</span>
+                  </button>
+
+                  {/* Button 3: Add Product Manually */}
+                  <button
+                    onClick={() => handleOpenManualModalWithBarcode(scannedBarcode)}
+                    className="w-full py-2 px-3 bg-[#16A34A] hover:bg-[#15803D] text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs"
+                  >
+                    <Plus className="w-4 h-4" />
                     <span>Add Product Manually (Pre-filled Barcode)</span>
                   </button>
                 </div>
@@ -1253,6 +1539,293 @@ export const BarcodeScannerScreen: React.FC<BarcodeScannerScreenProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL 3: AI-ASSISTED PRODUCT IDENTIFICATION VIA GEMINI VISION         */}
+      {/* ===================================================================== */}
+      {aiModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg shadow-2xl p-6 space-y-4 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold">
+                  <Sparkles className="w-4 h-4 text-indigo-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#172B4D]">Identify Product Using AI</h3>
+                  <p className="text-[11px] text-slate-500 font-mono">Barcode: {aiBarcode}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setAiModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {aiError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                <span>{aiError}</span>
+              </div>
+            )}
+
+            {!aiIdentifiedResult ? (
+              /* Step 1: Capture or Upload Packaging Photo */
+              <div className="space-y-3.5 text-xs">
+                <p className="text-slate-600 leading-relaxed">
+                  ClearBill AI examines the product package, brand label, or box photo to automatically recognize the commercial product name, brand, category, and pack size.
+                </p>
+
+                {/* Image Preview / Capture Area */}
+                <div className="border-2 border-dashed border-slate-300 rounded-xl p-4 text-center bg-slate-50 flex flex-col items-center justify-center">
+                  {aiImagePreview ? (
+                    <div className="space-y-2 w-full">
+                      <div className="relative max-h-56 overflow-hidden rounded-lg border border-slate-200 mx-auto">
+                        <img
+                          src={aiImagePreview}
+                          alt="Product Packaging"
+                          className="w-full h-48 object-contain bg-black/5"
+                        />
+                      </div>
+                      <div className="flex justify-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const snap = captureCameraSnapshot();
+                            if (snap) setAiImagePreview(snap);
+                          }}
+                          className="px-3 py-1 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg text-slate-700 font-semibold cursor-pointer text-[11px]"
+                        >
+                          Retake Camera Snapshot
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAiImagePreview(null)}
+                          className="px-3 py-1 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-lg text-rose-700 font-semibold cursor-pointer text-[11px]"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="py-4 space-y-2">
+                      <Camera className="w-8 h-8 text-slate-400 mx-auto" />
+                      <p className="text-slate-600 font-semibold">No packaging photo yet</p>
+                      <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const snap = captureCameraSnapshot();
+                            if (snap) setAiImagePreview(snap);
+                          }}
+                          className="px-3 py-1.5 bg-[#172B4D] hover:bg-[#203a66] text-white font-semibold rounded-lg cursor-pointer flex items-center gap-1.5 shadow-xs"
+                        >
+                          <Camera className="w-3.5 h-3.5" />
+                          <span>Capture from Video Stream</span>
+                        </button>
+                        <label className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg cursor-pointer flex items-center gap-1.5 shadow-2xs">
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Upload Image File</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={e => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = ev => {
+                                  if (ev.target?.result) {
+                                    setAiImagePreview(ev.target.result as string);
+                                  }
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Optional Text Hint */}
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Brand or Product Label Text Hint (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Parle-G, Amul Butter, Colgate Total"
+                    value={aiTextHint}
+                    onChange={e => setAiTextHint(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAiModalOpen(false)}
+                    className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRunAiIdentification}
+                    disabled={aiLoading}
+                    className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold rounded-lg shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {aiLoading ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-4 h-4 text-amber-300" />
+                    )}
+                    <span>{aiLoading ? 'Identifying with AI...' : 'Run AI Identification'}</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Step 2: AI Recognized Product -> Confirm Selling Price */
+              <form onSubmit={handleConfirmAiProductRegister} className="space-y-3.5 text-xs">
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-emerald-800 font-bold">
+                    <CheckCircle2 className="w-4 h-4 text-[#16A34A]" />
+                    <span>Product Recognized by ClearBill AI</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 pt-1 text-slate-800">
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase">Identified Name</span>
+                      <input
+                        type="text"
+                        value={aiIdentifiedResult.product_name}
+                        onChange={e =>
+                          setAiIdentifiedResult({
+                            ...aiIdentifiedResult,
+                            product_name: e.target.value,
+                          })
+                        }
+                        className="w-full font-bold text-slate-900 border-b border-emerald-300 bg-transparent py-0.5 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase">Brand</span>
+                      <input
+                        type="text"
+                        value={aiIdentifiedResult.brand}
+                        onChange={e =>
+                          setAiIdentifiedResult({
+                            ...aiIdentifiedResult,
+                            brand: e.target.value,
+                          })
+                        }
+                        className="w-full font-medium text-slate-800 border-b border-emerald-300 bg-transparent py-0.5 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase">Category</span>
+                      <input
+                        type="text"
+                        value={aiIdentifiedResult.category}
+                        onChange={e =>
+                          setAiIdentifiedResult({
+                            ...aiIdentifiedResult,
+                            category: e.target.value,
+                          })
+                        }
+                        className="w-full font-medium text-slate-800 border-b border-emerald-300 bg-transparent py-0.5 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase">Unit / Pack</span>
+                      <input
+                        type="text"
+                        value={aiIdentifiedResult.unit}
+                        onChange={e =>
+                          setAiIdentifiedResult({
+                            ...aiIdentifiedResult,
+                            unit: e.target.value,
+                          })
+                        }
+                        className="w-full font-medium text-slate-800 border-b border-emerald-300 bg-transparent py-0.5 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Selling Price Entry (Mandatory > 0) */}
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="block font-semibold text-slate-700">
+                      Store Selling Price (₹) <span className="text-rose-500">*</span>
+                    </label>
+                    {aiIdentifiedResult.estimated_mrp && (
+                      <span className="text-[11px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                        Printed MRP: ₹{aiIdentifiedResult.estimated_mrp}
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    placeholder="Enter retailer selling price (₹)"
+                    value={aiSellingPrice}
+                    onChange={e => setAiSellingPrice(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base font-bold text-slate-900 focus:outline-none focus:border-[#16A34A]"
+                    autoFocus
+                  />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">
+                    Retailer selling price is required. ClearBill AI never silently sets price to zero.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Applicable GST Rate (%)
+                  </label>
+                  <select
+                    value={aiTaxRate}
+                    onChange={e => setAiTaxRate(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 focus:outline-none focus:border-[#16A34A]"
+                  >
+                    <option value="0">0% (Exempt)</option>
+                    <option value="5">5% (Standard Groceries)</option>
+                    <option value="12">12% (Processed Goods)</option>
+                    <option value="18">18% (Consumer Goods)</option>
+                    <option value="28">28% (Luxury)</option>
+                  </select>
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAiIdentifiedResult(null)}
+                    className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg cursor-pointer"
+                  >
+                    Re-identify Photo
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={aiRegisterLoading}
+                    className="flex-1 py-2 bg-[#16A34A] hover:bg-[#15803D] disabled:opacity-50 text-white font-bold rounded-lg shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {aiRegisterLoading ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4" />
+                    )}
+                    <span>Confirm Selling Price & Add to Bill</span>
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

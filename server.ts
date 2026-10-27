@@ -432,6 +432,32 @@ app.post('/api/auth/register-customer', async (req: Request, res: Response) => {
     res.status(400).json({ error: err.message });
   }
 });
+app.post('/api/auth/customer-register', async (req: Request, res: Response) => {
+  const { fullName, email, phone, password } = req.body;
+  if (!fullName || !email || !password) {
+    return res.status(400).json({ error: 'fullName, email, and password are required.' });
+  }
+  if (String(password).length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  }
+
+  try {
+    const result = await registerCustomerUser({ fullName, email, phone, password });
+    activeSessions.set(result.token, {
+      userId: result.user.id,
+      email: result.user.email,
+      fullName: result.user.fullName,
+      role: 'customer',
+      companyId: 'cmp-demo-01',
+      outletId: 'out-demo-01',
+      token: result.token,
+      createdAt: Date.now(),
+    });
+    res.status(201).json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // 4. Products & Barcode Lookup (Protected: Retailer/Manager/Admin)
 app.get('/api/products', requireAuth(['retailer', 'manager', 'admin']), async (req: Request, res: Response) => {
@@ -537,6 +563,127 @@ app.post('/api/products/register-scanned', requireAuth(['retailer', 'manager', '
     res.status(201).json({ success: true, product });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to register product.' });
+  }
+});
+
+// AI-Assisted Product Packaging Identification (Protected: Retailer/Manager/Admin)
+app.post('/api/products/identify-ai', requireAuth(['retailer', 'manager', 'admin']), async (req: Request, res: Response) => {
+  const { barcode, imageBase64, textHint } = req.body;
+
+  if (!barcode || !String(barcode).trim()) {
+    return res.status(400).json({ error: 'Barcode is required for AI product identification.' });
+  }
+
+  const cleanBarcode = String(barcode).trim();
+
+  // If no image is provided, provide fallback or prompt
+  if (!imageBase64 && !textHint) {
+    return res.status(400).json({ error: 'Please provide a product packaging photo or text label hint.' });
+  }
+
+  try {
+    let identified = {
+      product_name: `Retail Item (${cleanBarcode.slice(-4)})`,
+      brand: 'Retail Brand',
+      category: 'General Retail',
+      unit: 'pcs',
+      package_size: 'Standard',
+      estimated_mrp: null as number | null,
+    };
+
+    // If Gemini client is active and imageBase64 provided
+    if (ai && imageBase64) {
+      // Clean base64 string
+      let mimeType = 'image/jpeg';
+      let rawBase64 = String(imageBase64);
+      if (rawBase64.includes(';base64,')) {
+        const parts = rawBase64.split(';base64,');
+        const mimeMatch = parts[0].match(/data:(image\/[a-zA-Z0-9.-]+)/);
+        if (mimeMatch) mimeType = mimeMatch[1];
+        rawBase64 = parts[1];
+      }
+
+      const promptText = `You are a retail product scanner for ClearBill AI.
+The cashier scanned barcode: "${cleanBarcode}".
+Examine this product packaging or label photo closely.
+Extract these details in structured JSON:
+- "product_name": Full commercial product name including variant or weight (e.g. "Haldiram's Aloo Bhujia 150g", "Britannia Good Day Butter Biscuits 200g")
+- "brand": Brand manufacturer name (e.g. "Haldiram's", "Britannia", "Nestle")
+- "category": Retail store category (e.g. "Snacks", "Biscuits", "Beverages", "Dairy", "Personal Care", "Groceries")
+- "unit": Retail unit of sale ("pcs", "pack", "bottle", "box", "kg", "g")
+- "package_size": Net weight or volume if printed (e.g. "150g", "500ml")
+- "estimated_mrp": Number of the printed MRP/Price if visible on packaging, or null if not clearly visible.
+`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType,
+                data: rawBase64,
+              },
+            },
+            { text: promptText },
+          ],
+        },
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+
+      const responseText = response.text?.trim() || '{}';
+      try {
+        const parsed = JSON.parse(responseText);
+        if (parsed.product_name) identified.product_name = parsed.product_name;
+        if (parsed.brand) identified.brand = parsed.brand;
+        if (parsed.category) identified.category = parsed.category;
+        if (parsed.unit) identified.unit = parsed.unit;
+        if (parsed.package_size) identified.package_size = parsed.package_size;
+        if (typeof parsed.estimated_mrp === 'number' && parsed.estimated_mrp > 0) {
+          identified.estimated_mrp = parsed.estimated_mrp;
+        }
+      } catch (parseErr) {
+        console.warn('[Gemini AI Parse Warning]', parseErr, responseText);
+      }
+    } else if (textHint) {
+      // Heuristic fallback if textHint supplied
+      identified.product_name = textHint.trim();
+    }
+
+    return res.json({
+      success: true,
+      source: 'ai_vision',
+      identifiedProduct: {
+        barcode: cleanBarcode,
+        product_name: identified.product_name,
+        brand: identified.brand,
+        category: identified.category,
+        unit: identified.unit,
+        package_size: identified.package_size,
+        estimated_mrp: identified.estimated_mrp,
+        requiresPriceConfirmation: true,
+      },
+    });
+  } catch (err: any) {
+    console.error('[AI Product Identification Error]', err);
+    // Return graceful recovery so retailer can still enter or confirm
+    return res.status(200).json({
+      success: true,
+      source: 'ai_fallback',
+      message: 'AI recognition finished with partial data. Please review details.',
+      identifiedProduct: {
+        barcode: cleanBarcode,
+        product_name: `Product ${cleanBarcode}`,
+        brand: 'Packaged Brand',
+        category: 'Packaged Goods',
+        unit: 'pcs',
+        package_size: '',
+        estimated_mrp: null,
+        requiresPriceConfirmation: true,
+      },
+    });
   }
 });
 
@@ -681,7 +828,7 @@ app.get('/api/receipts/:token', async (req: Request, res: Response) => {
   // If token is expired, only allow viewing if claimed by the authenticated customer or authorized staff
   if (result.isExpired && !isClaimedByCustomer && !isStaffAuthorized) {
     return res.status(410).json({
-      error: 'This receipt link has expired. Please log in to your customer account to view a receipt saved to your account.',
+      error: 'This dynamic guest receipt preview has expired. If you previously saved this receipt to your ClearBill customer account, please log in to access your permanent record.',
       isExpired: true,
       receiptNumber: result.receipt.receipt_number,
     });
@@ -763,6 +910,108 @@ app.get('/api/customer/receipts/:id', requireAuth(['customer', 'manager', 'admin
     return res.status(404).json({ error: 'Receipt not found.' });
   }
   res.json(result);
+});
+
+// Customer AI Spend Assistant (Hey GPT / Spend Analysis for Customer Portal)
+app.post('/api/customer/ai-spend-assistant', requireAuth(['customer', 'manager', 'admin']), async (req: Request, res: Response) => {
+  const auth = (req as any).auth as AuthSession;
+  const { prompt } = req.body;
+
+  if (!prompt || !String(prompt).trim()) {
+    return res.status(400).json({ error: 'Please enter a question or prompt for your spend assistant.' });
+  }
+
+  const customerUserId = auth.userId;
+  const receipts = await getCustomerReceipts(customerUserId);
+
+  let totalSpent = 0;
+  let totalTax = 0;
+  const categorySpend: Record<string, number> = {};
+  const storeSpend: Record<string, number> = {};
+  const itemMap: Record<string, { qty: number; total: number; category: string }> = {};
+
+  receipts.forEach(r => {
+    const tx = r.transaction;
+    if (tx) {
+      totalSpent += tx.grand_total || 0;
+      totalTax += tx.tax_amount || 0;
+      const storeName = r.company?.business_name || 'Retailer';
+      storeSpend[storeName] = (storeSpend[storeName] || 0) + (tx.grand_total || 0);
+
+      tx.items?.forEach((it: any) => {
+        const cat = it.category || 'Groceries';
+        categorySpend[cat] = (categorySpend[cat] || 0) + (it.line_total || 0);
+        if (!itemMap[it.product_name]) {
+          itemMap[it.product_name] = { qty: 0, total: 0, category: cat };
+        }
+        itemMap[it.product_name].qty += it.quantity;
+        itemMap[it.product_name].total += it.line_total;
+      });
+    }
+  });
+
+  const topItems = Object.entries(itemMap)
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 5)
+    .map(([name, data]) => `${name} (${data.qty}x, ₹${data.total.toFixed(2)})`);
+
+  const summaryContext = {
+    customerName: auth.fullName,
+    totalReceiptsCount: receipts.length,
+    totalSpentFormatted: `₹${totalSpent.toFixed(2)}`,
+    totalTaxPaid: `₹${totalTax.toFixed(2)}`,
+    topCategories: categorySpend,
+    topMerchants: storeSpend,
+    topPurchasedItems: topItems,
+  };
+
+  if (process.env.GEMINI_API_KEY && ai) {
+    try {
+      const systemInstruction = `You are Hey GPT / ClearBill AI Spend Assistant, an intelligent, personal financial and receipt spend analyst for customer ${auth.fullName}.
+You have access to the customer's actual, verified digital receipts:
+- Total Receipts in Vault: ${summaryContext.totalReceiptsCount}
+- Total Amount Spent: ${summaryContext.totalSpentFormatted}
+- Total Taxes (GST) Paid: ${summaryContext.totalTaxPaid}
+- Category Breakdown: ${JSON.stringify(summaryContext.topCategories)}
+- Stores Visited: ${JSON.stringify(summaryContext.topMerchants)}
+- Top Purchased Items: ${summaryContext.topPurchasedItems.join(', ') || 'No purchases recorded yet'}
+
+Instructions:
+1. Provide concise, friendly, helpful insights based STRICTLY on the customer's real receipt data.
+2. If the user asks about categories, specific items (e.g., tea, snacks, groceries), or totals, give exact numbers with ₹ symbol.
+3. If they ask for budget advice or ways to save, offer tailored tips based on their actual purchase habits.
+4. Keep the tone warm, modern, and scannable (using bullet points where helpful).
+5. Never invent fictional receipts or disclose banking credentials.`;
+
+      const aiResponse = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: { systemInstruction },
+      });
+
+      return res.json({
+        answer: aiResponse.text || 'I analyzed your spending records.',
+        summary: summaryContext,
+      });
+    } catch (aiErr) {
+      console.warn('[AI Customer Spend Assistant Error]', aiErr);
+    }
+  }
+
+  // Graceful deterministic fallback
+  let fallbackAnswer = `Based on your ${receipts.length} saved receipt(s), your total spend is ${summaryContext.totalSpentFormatted}.`;
+  if (Object.keys(categorySpend).length > 0) {
+    const topCat = Object.entries(categorySpend).sort((a, b) => b[1] - a[1])[0];
+    fallbackAnswer += ` Your largest spending category is ${topCat[0]} (₹${topCat[1].toFixed(2)}).`;
+  }
+  if (topItems.length > 0) {
+    fallbackAnswer += ` Top purchased items include: ${topItems.slice(0, 2).join(', ')}.`;
+  }
+
+  res.json({
+    answer: fallbackAnswer,
+    summary: summaryContext,
+  });
 });
 
 // 9. Dashboard Metrics (Protected: Manager/Retailer/Admin + Company Isolation)

@@ -34,7 +34,7 @@ async function runUniversalBarcodeScanningTests() {
 
   try {
     // ------------------------------------------------------------------------
-    // SETUP: Retailer Login
+    // SETUP: Retailer & Manager Login + Idempotent Test Cleanup
     // ------------------------------------------------------------------------
     const retLoginRes = await fetch(`${BASE_URL}/api/auth/login`, {
       method: 'POST',
@@ -49,6 +49,33 @@ async function runUniversalBarcodeScanningTests() {
     const retLogin = await retLoginRes.json();
     const retToken = retLogin.token;
     assert(Boolean(retToken), 'SETUP: Retailer session token issued');
+
+    const mgrLoginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'manager@clearbill.ai',
+        password: 'clearbill123',
+        role: 'manager',
+      }),
+    });
+    const mgrLogin = await mgrLoginRes.json();
+    const mgrToken = mgrLogin.token;
+
+    // Clean up test barcodes if registered in prior runs to ensure test idempotency
+    const testBarcodesToClean = ['8901058852332', '8909999888812', '8901491101837'];
+    for (const b of testBarcodesToClean) {
+      const chk = await fetch(`${BASE_URL}/api/products/lookup/${b}`, {
+        headers: { Authorization: `Bearer ${retToken}` },
+      });
+      const chkData = await chk.json();
+      if (chkData.found && chkData.product?.id) {
+        await fetch(`${BASE_URL}/api/products/${chkData.product.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${mgrToken}` },
+        });
+      }
+    }
 
     // ------------------------------------------------------------------------
     // TEST A: Existing barcode in MySQL
@@ -309,6 +336,74 @@ async function runUniversalBarcodeScanningTests() {
     assert(Boolean(receiptToken), 'TEST I.7: Scannable receipt guest token generated');
     const verifyReceiptRes = await fetch(`${BASE_URL}/api/receipts/${receiptToken}`);
     assert(verifyReceiptRes.ok, 'TEST I.8: Public receipt endpoint resolves authoritative receipt data');
+
+    // ------------------------------------------------------------------------
+    // TEST J: AI-Assisted Product Packaging Identification (Turn 7 Requirement)
+    // ------------------------------------------------------------------------
+    console.log('\n--- TEST J: AI-Assisted Product Identification (/api/products/identify-ai) ---');
+    const aiTestBarcode = '8901233001122';
+
+    // J.1: Reject call missing barcode
+    const aiMissingBarcodeRes = await fetch(`${BASE_URL}/api/products/identify-ai`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${retToken}`,
+      },
+      body: JSON.stringify({
+        textHint: 'Colgate MaxFresh',
+      }),
+    });
+    assert(aiMissingBarcodeRes.status === 400, 'TEST J.1: Missing barcode rejected with HTTP 400');
+
+    // J.2: AI Vision recognition endpoint responds with identified product
+    const aiIdentifyRes = await fetch(`${BASE_URL}/api/products/identify-ai`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${retToken}`,
+      },
+      body: JSON.stringify({
+        barcode: aiTestBarcode,
+        textHint: 'Haldirams Minute Khana Dal Makhani 300g',
+      }),
+    });
+    assert(aiIdentifyRes.ok, 'TEST J.2: AI identification endpoint returns HTTP 200');
+    const aiIdentifyData = await aiIdentifyRes.json();
+    assert(aiIdentifyData.success === true, 'TEST J.3: AI identification successful');
+    assert(Boolean(aiIdentifyData.identifiedProduct?.product_name), `TEST J.4: AI extracted product name: ${aiIdentifyData.identifiedProduct?.product_name}`);
+    assert(aiIdentifyData.identifiedProduct?.barcode === aiTestBarcode, 'TEST J.5: Returns scanned barcode in identified record');
+    assert(aiIdentifyData.identifiedProduct?.requiresPriceConfirmation === true, 'TEST J.6: Enforces retailer selling price confirmation');
+
+    // J.7: Retailer sets confirmed selling price and registers the AI-identified product in MySQL
+    const aiRegisterRes = await fetch(`${BASE_URL}/api/products/register-scanned`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${retToken}`,
+      },
+      body: JSON.stringify({
+        companyId: 'cmp-demo-01',
+        outletId: 'out-demo-01',
+        barcode: aiTestBarcode,
+        product_name: aiIdentifyData.identifiedProduct.product_name,
+        category: aiIdentifyData.identifiedProduct.category || 'Ready to Eat',
+        unit: aiIdentifyData.identifiedProduct.unit || 'pack',
+        unit_price: 110.00, // Retailer's selling price
+        tax_rate: 5.0,
+      }),
+    });
+    assert(aiRegisterRes.status === 201, 'TEST J.7: AI-identified product registered with confirmed selling price (HTTP 201)');
+    const aiRegisterData = await aiRegisterRes.json();
+    assert(aiRegisterData.product?.unit_price === 110.00, 'TEST J.8: Selling price ₹110.00 saved in MySQL');
+
+    // J.9: Subsequent scan now resolves immediately from MySQL!
+    const relookupAiRes = await fetch(`${BASE_URL}/api/products/lookup/${aiTestBarcode}`, {
+      headers: { Authorization: `Bearer ${retToken}` },
+    });
+    const relookupAiData = await relookupAiRes.json();
+    assert(relookupAiData.found === true, 'TEST J.9: Subsequent scan of AI-registered barcode resolves immediately from MySQL');
+    assert(relookupAiData.source === 'mysql', 'TEST J.10: Source confirmed as MySQL store inventory');
   } catch (err: any) {
     console.error('Fatal Test Suite Error:', err);
     failed++;

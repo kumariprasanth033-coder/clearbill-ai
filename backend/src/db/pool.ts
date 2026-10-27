@@ -1086,8 +1086,8 @@ export async function createTransactionWithItems(
       {
         id: `tok-id-${Date.now()}`,
         token: guestToken,
-        viewing_session_seconds: 30,
-        expires_at: new Date(Date.now() + 86400000).toISOString(), // Token valid until end of day/24h
+        viewing_session_seconds: 300,
+        expires_at: new Date(Date.now() + 300000).toISOString(), // 5 minutes dynamic preview countdown window
         is_claimed: false,
       },
     ],
@@ -1151,7 +1151,7 @@ export async function createTransactionWithItems(
       await pool.query(
         `INSERT INTO receipt_tokens (id, receipt_id, token, viewing_session_seconds, expires_at, is_claimed)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [`tok-id-${Date.now()}`, rcptId, guestToken, 30, new Date(Date.now() + 86400000).toISOString(), 0]
+        [`tok-id-${Date.now()}`, rcptId, guestToken, 300, new Date(Date.now() + 300000).toISOString(), 0]
       );
     } catch (dbErr) {
       console.warn('[DB] MySQL transaction/receipt persist notice (in-memory store retained):', dbErr);
@@ -1262,10 +1262,17 @@ export async function getCustomerReceipts(customerUserId: string) {
   
   return inMemoryStore.receipts
     .filter(r => claimedReceiptIds.has(r.id))
-    .map(r => ({
-      ...r,
-      transaction: inMemoryStore.transactions.find(tx => tx.id === r.transaction_id),
-    }));
+    .map(r => {
+      const tx = inMemoryStore.transactions.find(tx => tx.id === r.transaction_id);
+      const company = inMemoryStore.companies.find(c => c.id === tx?.company_id) || inMemoryStore.companies[0];
+      const outlet = inMemoryStore.outlets.find(o => o.company_id === company?.id) || inMemoryStore.outlets[0];
+      return {
+        ...r,
+        transaction: tx,
+        company,
+        outlet,
+      };
+    });
 }
 
 export async function getTransactions(companyId: string) {
